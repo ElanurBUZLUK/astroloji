@@ -13,8 +13,13 @@ A production-ready, Almuten-centric astrology interpretation engine with time-lo
 ### Quick Start
 1. Provision infra (Postgres, Neo4j, Vector DB, Redis).
 2. `poetry install && uvicorn app.main:app --reload` (example)
+   - Alternatif olarak sistem Python'u için `./scripts/install_backend_requirements.sh` komutuyla bağımlılıkları kurabilirsiniz.
 3. Create a chart: `POST /charts` → request interpretation `POST /requests`.
 
 ### Safety & Ethics
 - Not medical/financial advice.
 - PII minimized, consent required (GDPR-ready).
+
+### Orchestrator & Telemetry
+- Health-weighted LLM yönlendirmesi, degrade politikaları ve tuning süreci için `docs/orchestrator_pack.md` rehberini takip edin.
+- Canlı telemetriye göre eşik ayarlamak için `python backend/scripts/tune_router_thresholds.py --target-precision 0.9` komutunu kullanın; çıktıdaki önerileri `.env` veya konfig servisinize uygulayın.

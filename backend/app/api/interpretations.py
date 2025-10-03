@@ -11,6 +11,7 @@ from app.interpreters.core import InterpretationEngine
 from app.interpreters.output_composer import OutputMode, OutputStyle
 from app.rag.core import RAGSystem, RAGQuery
 from app.rag.citation import CitationStyle
+from app.services import ChartService, InterpretationService
 
 router = APIRouter()
 
@@ -57,12 +58,19 @@ async def create_interpretation_request(request_data: InterpretationRequest):
                 detail=f"Unknown interpretation mode: {request_data.mode}"
             )
         
-        # For now, use mock chart data since we don't have database storage yet
-        # In production, this would retrieve chart data from database using chart_id
-        mock_chart_data = _get_mock_chart_data(request_data.chart_id)
+        # Retrieve chart data from database
+        chart = ChartService.get_chart(request_data.chart_id)
+        if not chart:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Chart with ID {request_data.chart_id} not found"
+            )
+
+        # Convert stored chart data to interpretation format
+        chart_data = _convert_stored_chart_to_interpretation_format(chart)
         
         # Get interpretation summary to identify key elements
-        interpretation_summary = engine.get_interpretation_summary(mock_chart_data)
+        interpretation_summary = engine.get_interpretation_summary(chart_data)
         main_elements = interpretation_summary.get("main_themes", [])
         
         # Query RAG system for additional context
@@ -76,7 +84,7 @@ async def create_interpretation_request(request_data: InterpretationRequest):
         
         # Generate interpretation with RAG augmentation
         interpretation = engine.interpret_chart(
-            chart_data=mock_chart_data,
+            chart_data=chart_data,
             mode=output_mode,
             focus_topic=request_data.focus_topic
         )
@@ -90,13 +98,44 @@ async def create_interpretation_request(request_data: InterpretationRequest):
             
             interpretation.summary += rag_insights
         
+        # Save interpretation to database
+        interpretation_text = interpretation.summary
+        if rag_response.retrieved_content:
+            rag_insights = "\n\n**Traditional Sources:**\n"
+            for i, content in enumerate(rag_response.retrieved_content[:3]):
+                rag_insights += f"• {content[:200]}...\n"
+            interpretation_text += rag_insights
+
+        saved = InterpretationService.save_interpretation(
+            interpretation_id=request_id,
+            chart_id=request_data.chart_id,
+            query=f"Interpretation mode: {request_data.mode}" + (f", focus: {request_data.focus_topic}" if request_data.focus_topic else ""),
+            mode=request_data.mode,
+            interpretation=interpretation_text,
+            confidence_score=interpretation.overall_confidence,
+            sources={
+                "rag_sources": len(rag_response.retrieved_content),
+                "citations": [
+                    {
+                        "id": cite.id,
+                        "title": cite.title,
+                        "credibility": cite.credibility_score
+                    }
+                    for cite in (rag_response.citations or [])
+                ]
+            }
+        )
+
+        if not saved:
+            print("Warning: Failed to save interpretation to database")
+
         # Format response
         response = {
             "request_id": request_id,
             "chart_id": request_data.chart_id,
             "mode": request_data.mode,
             "status": "completed",
-            "summary": interpretation.summary,
+            "summary": interpretation_text,
             "confidence": interpretation.overall_confidence,
             "sections": [
                 {
@@ -123,6 +162,7 @@ async def create_interpretation_request(request_data: InterpretationRequest):
                 ],
                 "processing_time": rag_response.processing_time
             },
+            "stored_in_db": saved,
             "created_at": datetime.now()
         }
         
@@ -137,11 +177,36 @@ async def create_interpretation_request(request_data: InterpretationRequest):
 @router.get("/{request_id}")
 async def get_interpretation_result(request_id: str):
     """Get interpretation result by request ID"""
-    # TODO: Implement result retrieval from database
+    try:
+        interpretation = InterpretationService.get_interpretation(request_id)
+        if interpretation:
+            return interpretation
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Interpretation with ID {request_id} not found"
+            )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving interpretation: {str(e)}"
+        )
+
+def _convert_stored_chart_to_interpretation_format(chart: Dict[str, Any]) -> Dict[str, Any]:
+    """Convert stored chart data to interpretation engine format"""
+    calculations = chart.get("calculations", {})
+
     return {
-        "request_id": request_id,
-        "status": "completed",
-        "message": "Result retrieval from database not yet implemented"
+        "chart_id": chart.get("chart_id"),
+        "planets": calculations.get("planets", {}),
+        "houses": calculations.get("houses", {}),
+        "almuten": calculations.get("almuten", {}),
+        "zodiacal_releasing": calculations.get("zodiacal_releasing", {}),
+        "profection": calculations.get("profection"),
+        "firdaria": calculations.get("firdaria"),
+        "antiscia": calculations.get("antiscia"),
+        "lots": calculations.get("lots", {}),
+        "is_day_birth": calculations.get("is_day_birth", False)
     }
 
 def _get_mock_chart_data(chart_id: str) -> Dict[str, Any]:

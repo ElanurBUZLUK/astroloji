@@ -10,6 +10,8 @@ import random
 from enum import Enum
 
 from .metrics import EvaluationSuite, MetricResult
+from ..pipelines.rag_pipeline import RAGAnswerPipeline
+from ..schemas import RAGAnswerRequest
 
 class TestStatus(Enum):
     """Test execution status"""
@@ -175,7 +177,7 @@ class TestSuite:
     async def run_test_case(self, test_case: TestCase, system: Any) -> TestResult:
         """Run a single test case"""
         start_time = datetime.now()
-        
+
         try:
             if test_case.category == "rag":
                 return await self._run_rag_test(test_case, system)
@@ -185,7 +187,7 @@ class TestSuite:
                 return await self._run_integration_test(test_case, system)
             else:
                 raise ValueError(f"Unknown test category: {test_case.category}")
-                
+
         except Exception as e:
             execution_time = (datetime.now() - start_time).total_seconds()
             return TestResult(
@@ -200,19 +202,19 @@ class TestSuite:
     async def _run_rag_test(self, test_case: TestCase, rag_system) -> TestResult:
         """Run RAG-specific test"""
         start_time = datetime.now()
-        
+
         # Execute RAG query
         query = test_case.test_data["query"]
-        result = await rag_system.query(query)
-        
-        # Extract results
-        retrieved_docs = [doc["content"] for doc in result.get("sources", [])]
-        generated_text = result.get("answer", "")
-        citations = result.get("citations", [])
-        
+        pipeline = rag_system or RAGAnswerPipeline()
+        response = await pipeline.run(RAGAnswerRequest(query=query))
+
+        retrieved_docs = [doc["content"] for doc in response.evidence_pack.get("documents", [])]
+        generated_text = response.payload.answer.general_profile
+        citations = response.payload.citations
+
         # Evaluate using metrics
         relevant_docs = test_case.test_data["relevant_docs"]
-        
+
         metrics = self.evaluation_suite.evaluate_rag_system(
             query=query,
             retrieved_docs=retrieved_docs,

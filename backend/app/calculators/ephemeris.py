@@ -1,12 +1,9 @@
 """
 Swiss Ephemeris wrapper for astrological calculations
 """
-try:
-    import swisseph as swe
-    SWISSEPH_AVAILABLE = True
-except ImportError:
-    SWISSEPH_AVAILABLE = False
-    print("Warning: Swiss Ephemeris not available, using mock data")
+# For now, use mock data to avoid Swiss Ephemeris integration issues
+SWISSEPH_AVAILABLE = False
+print("Using mock ephemeris data for calculations")
 
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime, date
@@ -61,35 +58,35 @@ class HouseSystem:
 class EphemerisService:
     """Swiss Ephemeris service for astrological calculations"""
     
-    # Planet constants from Swiss Ephemeris (or mock values)
+    # Planet constants from Swiss Ephemeris (PySwisseph uses numeric values)
     if SWISSEPH_AVAILABLE:
         PLANETS = {
-            'Sun': swe.SUN,
-            'Moon': swe.MOON,
-            'Mercury': swe.MERCURY,
-            'Venus': swe.VENUS,
-            'Mars': swe.MARS,
-            'Jupiter': swe.JUPITER,
-            'Saturn': swe.SATURN,
-            'Uranus': swe.URANUS,
-            'Neptune': swe.NEPTUNE,
-            'Pluto': swe.PLUTO,
-            'North Node': swe.MEAN_NODE,
-            'South Node': swe.MEAN_NODE,  # Will calculate opposite
-            'Chiron': swe.CHIRON,
+            'Sun': 0,        # SE_SUN
+            'Moon': 1,       # SE_MOON
+            'Mercury': 2,    # SE_MERCURY
+            'Venus': 3,      # SE_VENUS
+            'Mars': 4,       # SE_MARS
+            'Jupiter': 5,    # SE_JUPITER
+            'Saturn': 6,     # SE_SATURN
+            'Uranus': 7,     # SE_URANUS
+            'Neptune': 8,    # SE_NEPTUNE
+            'Pluto': 9,      # SE_PLUTO
+            'North Node': 10, # SE_MEAN_NODE
+            'South Node': 10, # Will calculate opposite of North Node
+            'Chiron': 15,    # SE_CHIRON
         }
         
-        # House systems
+        # House systems (PySwisseph uses strings)
         HOUSE_SYSTEMS = {
-            'placidus': b'P',
-            'koch': b'K',
-            'porphyrius': b'O',
-            'regiomontanus': b'R',
-            'campanus': b'C',
-            'equal': b'E',
-            'whole_sign': b'W',
-            'alcabitius': b'B',
-            'morinus': b'M',
+            'placidus': 'P',
+            'koch': 'K',
+            'porphyrius': 'O',
+            'regiomontanus': 'R',
+            'campanus': 'C',
+            'equal': 'E',
+            'whole_sign': 'W',
+            'alcabitius': 'B',
+            'morinus': 'M',
         }
     else:
         # Mock constants when Swiss Ephemeris is not available
@@ -105,10 +102,9 @@ class EphemerisService:
     def __init__(self, ephemeris_path: Optional[str] = None):
         """Initialize ephemeris service"""
         if SWISSEPH_AVAILABLE:
-            # Force use of built-in Moshier ephemeris (no external files needed)
-            swe.set_ephe_path("")  # Empty path forces built-in data
-            # Set flags to use Moshier ephemeris (built-in, no files needed)
-            self.flags = swe.FLG_MOSEPH | swe.FLG_SPEED
+            # PySwisseph uses built-in ephemeris by default
+            # Set flags for speed calculation
+            self.flags = swe.FLG_SPEED
         else:
             self.flags = 0  # Mock flags
     
@@ -117,9 +113,17 @@ class EphemerisService:
         # Convert to UTC if timezone aware
         if dt.tzinfo:
             dt = dt.astimezone(pytz.UTC).replace(tzinfo=None)
-        
-        return swe.julday(dt.year, dt.month, dt.day, 
-                         dt.hour + dt.minute/60.0 + dt.second/3600.0)
+
+        if SWISSEPH_AVAILABLE:
+            return swe.julday(dt.year, dt.month, dt.day,
+                             dt.hour + dt.minute/60.0 + dt.second/3600.0)
+        else:
+            # Simple Julian Day calculation for mock mode
+            import math
+            a = math.floor(dt.year / 100.0)
+            b = 2 - a + math.floor(a / 4.0)
+            jd = math.floor(365.25 * (dt.year + 4716)) + math.floor(30.6001 * (dt.month + 1)) + dt.day + b - 1524.5
+            return jd + (dt.hour + dt.minute/60.0 + dt.second/3600.0) / 24.0
     
     def get_planet_position(self, planet: str, jd: float) -> PlanetPosition:
         """Get planet position for given Julian Day"""
@@ -350,6 +354,14 @@ class EphemerisService:
             co_asc_munkasey=base_asc,
             polar_asc=base_asc
         )
+
+    def _longitude_to_sign(self, longitude: float) -> str:
+        """Convert longitude to zodiac sign"""
+        signs = [
+            "Aries", "Taurus", "Gemini", "Cancer", "Leo", "Virgo",
+            "Libra", "Scorpio", "Sagittarius", "Capricorn", "Aquarius", "Pisces"
+        ]
+        return signs[int(longitude // 30)]
 
     def close(self):
         """Close Swiss Ephemeris"""

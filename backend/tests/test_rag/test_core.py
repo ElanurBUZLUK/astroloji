@@ -30,13 +30,16 @@ async def test_basic_rag_query():
     )
     
     response = await rag_system.query(rag_query)
-    
+
     assert response.query == rag_query.query
     assert len(response.retrieved_content) <= 3
     assert response.confidence_score >= 0.0
     assert response.confidence_score <= 1.0
     assert response.processing_time > 0
     assert response.citations is not None
+    assert isinstance(response.documents, list)
+    assert isinstance(response.evidence_pack, dict)
+    assert hasattr(response, "documents")
 
 @pytest.mark.asyncio
 async def test_query_by_topic():
@@ -68,6 +71,30 @@ async def test_query_for_interpretation():
     
     assert len(response.retrieved_content) > 0
     assert response.confidence_score > 0
+
+
+@pytest.mark.asyncio
+async def test_query_for_interpretation_policy_override():
+    """Policy overrides should adjust retrieval behaviour."""
+    rag_system = RAGSystem()
+
+    chart_elements = ["Mars", "Aries", "Career"]
+    interpretation_context = {"user_level": "beginner", "focus_areas": ["career"]}
+    policy = {
+        "top_k": 2,
+        "expand_query": False,
+        "rerank_results": False,
+        "retrieval_method": "dense",
+    }
+
+    response = await rag_system.query_for_interpretation(
+        chart_elements,
+        interpretation_context,
+        policy=policy,
+    )
+
+    assert len(response.retrieved_content) <= 2
+    assert response.reranking_stats == {}
 
 @pytest.mark.asyncio
 async def test_query_without_expansion():
@@ -166,6 +193,18 @@ async def test_add_knowledge():
     
     success = await rag_system.add_knowledge(new_documents)
     assert success is True
+
+
+def test_rag_system_fallback_to_mocks(monkeypatch):
+    """If external services are unavailable, fall back to mock stores."""
+    monkeypatch.setattr("app.rag.core.QdrantClient", None)
+    monkeypatch.setattr("app.rag.core.VectorParams", None)
+    monkeypatch.setattr("app.rag.core.OpenSearch", None)
+
+    system = RAGSystem()
+
+    assert type(system.vector_store).__name__ == "MockVectorStore"
+    assert type(system.sparse_store).__name__ == "MockSparseStore"
 
 @pytest.mark.asyncio
 async def test_error_handling():

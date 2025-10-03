@@ -13,6 +13,12 @@ from app.calculators.zodiac_releasing import ZRCalculator
 from app.calculators.profection import ProfectionCalculator
 from app.calculators.firdaria import FirdariaCalculator
 from app.calculators.antiscia import AntisciaCalculator
+from app.calculators.progressions import ProgressionsCalculator
+from app.calculators.solar_arc import SolarArcCalculator
+from app.calculators.transits import TransitsCalculator
+from app.calculators.midpoints import MidpointsCalculator
+from app.calculators.fixed_stars import FixedStarsCalculator
+from app.services import ChartService
 
 router = APIRouter()
 
@@ -64,6 +70,11 @@ async def create_chart(birth_data: BirthData):
         profection_calc = ProfectionCalculator()
         firdaria_calc = FirdariaCalculator()
         antiscia_calc = AntisciaCalculator()
+        progressions_calc = ProgressionsCalculator()
+        solar_arc_calc = SolarArcCalculator()
+        transits_calc = TransitsCalculator()
+        midpoints_calc = MidpointsCalculator()
+        fixed_stars_calc = FixedStarsCalculator()
         
         try:
             # Calculate Julian Day
@@ -119,61 +130,96 @@ async def create_chart(birth_data: BirthData):
             # Calculate Antiscia
             planet_longitudes = {name: pos.longitude for name, pos in planets.items()}
             antiscia_result = antiscia_calc.get_antiscia_summary(planet_longitudes)
+
+            # Calculate Progressions (Secondary)
+            progressions_result = progressions_calc.get_current_progressions(planet_longitudes, birth_data.birth_date)
+
+            # Calculate Solar Arc Directions
+            solar_arc_result = solar_arc_calc.get_current_solar_arc_directions(planet_longitudes, birth_data.birth_date)
+
+            # Calculate Transits (current)
+            # Note: For transits we need current positions, using simplified calculation
+            transits_result = transits_calc.get_major_transits(planet_longitudes, planet_longitudes)
+
+            # Calculate Midpoints
+            midpoints_result = midpoints_calc.get_major_midpoints_summary(planet_longitudes)
+
+            # Calculate Fixed Stars
+            fixed_stars_result = fixed_stars_calc.get_star_contacts_summary(planet_longitudes)
             
+            # Prepare calculations data for storage
+            calculations_data = {
+                "planets": {
+                    name: {
+                        "longitude": pos.longitude,
+                        "sign": pos.sign,
+                        "degree_in_sign": pos.degree_in_sign,
+                        "is_retrograde": pos.is_retrograde,
+                        "speed": pos.speed_longitude
+                    }
+                    for name, pos in planets.items()
+                },
+                "houses": {
+                    "system": "placidus",
+                    "cusps": houses.cusps,
+                    "asc": houses.asc,
+                    "mc": houses.mc,
+                    "asc_sign": _longitude_to_sign(houses.asc),
+                    "mc_sign": _longitude_to_sign(houses.mc)
+                },
+                "almuten": {
+                    "winner": almuten_result.winner,
+                    "scores": almuten_result.scores,
+                    "tie_break_reason": almuten_result.tie_break_reason,
+                    "diagnostics": almuten_result.diagnostics
+                },
+                "zodiacal_releasing": {
+                    "lot_used": zr_timeline.lot_used,
+                    "current_periods": _get_current_zr_periods(zr_timeline, datetime.now().date()),
+                    "next_peaks": _get_next_peaks(zr_timeline, datetime.now().date()),
+                    "diagnostics": zr_timeline.diagnostics
+                },
+                "profection": {
+                    "age": profection_result.age,
+                    "profected_house": profection_result.profected_house,
+                    "profected_sign": profection_result.profected_sign,
+                    "year_lord": profection_result.year_lord,
+                    "activated_topics": profection_result.activated_topics
+                },
+                "firdaria": firdaria_result,
+                                    "antiscia": {
+                        "summary": antiscia_result["summary"],
+                        "strongest_contacts": antiscia_calc.get_strongest_antiscia_contacts(planet_longitudes, limit=3)
+                    },
+                    "progressions": progressions_result,
+                    "solar_arc": solar_arc_result,
+                    "transits": transits_result,
+                    "midpoints": midpoints_result,
+                    "fixed_stars": fixed_stars_result,
+                    "lots": lots,
+                    "is_day_birth": is_day
+                }
+
+            # Save to database
+            saved = ChartService.save_chart(
+                chart_id=chart_id,
+                birth_data=birth_data.dict(),
+                calculations=calculations_data
+            )
+
+            if not saved:
+                print("Warning: Failed to save chart to database")
+
             # Format response
             response = {
                 "chart_id": chart_id,
                 "status": "completed",
                 "birth_data": birth_data.dict(),
-                "calculations": {
-                    "planets": {
-                        name: {
-                            "longitude": pos.longitude,
-                            "sign": pos.sign,
-                            "degree_in_sign": pos.degree_in_sign,
-                            "is_retrograde": pos.is_retrograde,
-                            "speed": pos.speed_longitude
-                        }
-                        for name, pos in planets.items()
-                    },
-                    "houses": {
-                        "system": "placidus",
-                        "cusps": houses.cusps,
-                        "asc": houses.asc,
-                        "mc": houses.mc,
-                        "asc_sign": _longitude_to_sign(houses.asc),
-                        "mc_sign": _longitude_to_sign(houses.mc)
-                    },
-                    "almuten": {
-                        "winner": almuten_result.winner,
-                        "scores": almuten_result.scores,
-                        "tie_break_reason": almuten_result.tie_break_reason,
-                        "diagnostics": almuten_result.diagnostics
-                    },
-                    "zodiacal_releasing": {
-                        "lot_used": zr_timeline.lot_used,
-                        "current_periods": _get_current_zr_periods(zr_timeline, datetime.now().date()),
-                        "next_peaks": _get_next_peaks(zr_timeline, datetime.now().date()),
-                        "diagnostics": zr_timeline.diagnostics
-                    },
-                    "profection": {
-                        "age": profection_result.age,
-                        "profected_house": profection_result.profected_house,
-                        "profected_sign": profection_result.profected_sign,
-                        "year_lord": profection_result.year_lord,
-                        "activated_topics": profection_result.activated_topics
-                    },
-                    "firdaria": firdaria_result,
-                    "antiscia": {
-                        "summary": antiscia_result["summary"],
-                        "strongest_contacts": antiscia_calc.get_strongest_antiscia_contacts(planet_longitudes, limit=3)
-                    },
-                    "lots": lots,
-                    "is_day_birth": is_day
-                },
-                "created_at": datetime.now()
+                "calculations": calculations_data,
+                "created_at": datetime.now(),
+                "stored_in_db": saved
             }
-            
+
             return response
             
         finally:
@@ -188,13 +234,20 @@ async def create_chart(birth_data: BirthData):
 @router.get("/{chart_id}")
 async def get_chart(chart_id: str):
     """Get chart by ID"""
-    # TODO: Implement chart retrieval from database
-    # For now, return a placeholder
-    return {
-        "chart_id": chart_id,
-        "status": "stored",
-        "message": "Chart retrieval from database not yet implemented"
-    }
+    try:
+        chart = ChartService.get_chart(chart_id)
+        if chart:
+            return chart
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Chart with ID {chart_id} not found"
+            )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error retrieving chart: {str(e)}"
+        )
 
 def _longitude_to_sign(longitude: float) -> str:
     """Convert longitude to zodiac sign"""

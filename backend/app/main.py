@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 
 from app.api import auth, charts, interpretations, alerts, admin
+from app.api.v1 import api_router as api_v1_router
 from app.config import settings
 from app.middleware.observability import ObservabilityMiddleware, PerformanceMiddleware
 from app.evaluation.observability import observability
@@ -51,6 +52,7 @@ def create_app() -> FastAPI:
     )
     
     # Include routers
+    app.include_router(api_v1_router)
     app.include_router(auth.router, prefix="/auth", tags=["auth"])
     app.include_router(charts.router, prefix="/charts", tags=["charts"])
     app.include_router(interpretations.router, prefix="/interpretations", tags=["interpretations"])

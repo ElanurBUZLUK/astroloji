@@ -4,9 +4,36 @@ Hybrid retrieval system (Dense + BM25) for astrological knowledge
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass
 from enum import Enum
-import json
+import asyncio
 import math
 from abc import ABC, abstractmethod
+import uuid
+
+from app.rag.embeddings import EMBEDDING_DIM, generate_embedding
+
+try:  # pragma: no cover - optional dependency imports
+    from qdrant_client import QdrantClient
+    from qdrant_client.http.models import (
+        Distance,
+        FieldCondition,
+        Filter,
+        MatchValue,
+        PointStruct,
+        VectorParams,
+    )
+except Exception:  # pragma: no cover
+    QdrantClient = None
+    Filter = None
+    FieldCondition = None
+    MatchValue = None
+    PointStruct = None
+
+try:  # pragma: no cover - optional dependency imports
+    from opensearchpy import OpenSearch
+    from opensearchpy.helpers import bulk
+except Exception:  # pragma: no cover
+    OpenSearch = None
+    bulk = None
 
 class RetrievalMethod(Enum):
     """Retrieval methods"""
@@ -251,6 +278,142 @@ class MockSparseStore(SparseStore):
         
         return True
 
+    async def add_documents(self, documents: List[Dict[str, Any]]) -> bool:
+        self.documents.extend(documents)
+        return True
+
+
+class QdrantVectorStore(VectorStore):
+    """Qdrant backed vector store."""
+
+    def __init__(self, client: QdrantClient, collection_name: str) -> None:
+        if not QdrantClient:
+            raise RuntimeError("qdrant-client library not available")
+        self.client = client
+        self.collection_name = collection_name
+
+    async def search(
+        self, query_vector: List[float], top_k: int = 10, filters: Dict[str, Any] | None = None
+    ) -> List[RetrievalResult]:
+        search_filter = self._build_filter(filters)
+        results = await self.client.async_search(
+            collection_name=self.collection_name,
+            query_vector=query_vector,
+            limit=top_k,
+            search_params={"hnsw_ef": 128},
+            query_filter=search_filter,
+        )
+
+        retrieval_results: List[RetrievalResult] = []
+        for point in results:
+            payload = point.payload or {}
+            retrieval_results.append(
+                RetrievalResult(
+                    content=payload.get("content", ""),
+                    score=point.score,
+                    source_id=str(point.id),
+                    metadata=payload.get("metadata", {}),
+                    method=RetrievalMethod.DENSE,
+                )
+            )
+        return retrieval_results
+
+    async def add_documents(self, documents: List[Dict[str, Any]]) -> bool:
+        vectors = [generate_embedding(doc["content"]) for doc in documents]
+        payloads = []
+        ids = []
+        for doc, vector in zip(documents, vectors):
+            payloads.append({"content": doc["content"], "metadata": doc.get("metadata", {})})
+            ids.append(doc.get("id") or str(uuid.uuid4()))
+        points = [
+            PointStruct(id=doc_id, vector=vector, payload=payload)
+            for doc_id, vector, payload in zip(ids, vectors, payloads)
+        ]
+        await self.client.async_upsert(collection_name=self.collection_name, points=points)
+        return True
+
+    def _build_filter(self, filters: Optional[Dict[str, Any]]) -> Optional[Filter]:
+        if not filters:
+            return None
+        if not Filter or not FieldCondition or not MatchValue:
+            return None
+        conditions = []
+        for key, value in filters.items():
+            conditions.append(
+                FieldCondition(key=f"metadata.{key}", match=MatchValue(value=value))
+            )
+        if not conditions:
+            return None
+        return Filter(must=conditions)
+
+
+class OpenSearchSparseStore(SparseStore):
+    """OpenSearch backed sparse store."""
+
+    def __init__(self, client: OpenSearch, index_name: str) -> None:
+        if not OpenSearch:
+            raise RuntimeError("opensearch-py library not available")
+        self.client = client
+        self.index = index_name
+
+    async def search(
+        self, query_text: str, top_k: int = 10, filters: Dict[str, Any] | None = None
+    ) -> List[RetrievalResult]:
+        query_body: Dict[str, Any] = {
+            "size": top_k,
+            "query": {
+                "bool": {
+                    "must": {"match": {"content": query_text}},
+                    "filter": self._build_filters(filters),
+                }
+            },
+        }
+        response = await asyncio.to_thread(
+            self.client.search, index=self.index, body=query_body
+        )
+        hits = response.get("hits", {}).get("hits", [])
+        results: List[RetrievalResult] = []
+        for hit in hits:
+            source = hit.get("_source", {})
+            results.append(
+                RetrievalResult(
+                    content=source.get("content", ""),
+                    score=hit.get("_score", 0.0),
+                    source_id=hit.get("_id", ""),
+                    metadata=source.get("metadata", {}),
+                    method=RetrievalMethod.SPARSE,
+                )
+            )
+        return results
+
+    async def add_documents(self, documents: List[Dict[str, Any]]) -> bool:
+        if not bulk:
+            raise RuntimeError("opensearch-py helpers not available")
+        actions = []
+        for doc in documents:
+            actions.append(
+                {
+                    "_op_type": "index",
+                    "_index": self.index,
+                    "_id": doc.get("id"),
+                    "content": doc["content"],
+                    "metadata": doc.get("metadata", {}),
+                }
+            )
+        await asyncio.to_thread(bulk, self.client, actions)
+        return True
+
+    def _build_filters(self, filters: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not filters:
+            return []
+        filter_blocks: List[Dict[str, Any]] = []
+        for key, value in filters.items():
+            if isinstance(value, list):
+                filter_blocks.append({"terms": {f"metadata.{key}": value}})
+            else:
+                filter_blocks.append({"term": {f"metadata.{key}": value}})
+        return filter_blocks
+
 class HybridRetriever:
     """Hybrid retrieval system combining dense and sparse search"""
     
@@ -273,11 +436,9 @@ class HybridRetriever:
     
     async def _dense_retrieve(self, query: RetrievalQuery) -> List[RetrievalResult]:
         """Dense vector retrieval"""
-        # In real implementation, would embed query text
-        mock_query_vector = [0.1] * 384  # Mock embedding
-        
+        query_vector = generate_embedding(query.query_text)
         results = await self.vector_store.search(
-            query_vector=mock_query_vector,
+            query_vector=query_vector,
             top_k=query.top_k,
             filters=query.filters
         )

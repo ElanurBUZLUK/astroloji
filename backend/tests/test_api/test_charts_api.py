@@ -104,6 +104,8 @@ def test_chart_response_structure():
                       "profection", "firdaria", "antiscia", "lots", "is_day_birth"]
         for field in calc_fields:
             assert field in calc
+
+        assert "normalized" in data
         
         # Check planet structure
         if "Sun" in calc["planets"]:
