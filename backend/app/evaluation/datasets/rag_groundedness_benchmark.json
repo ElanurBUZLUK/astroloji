@@ -1,0 +1,116 @@
+{
+  "benchmark_id": "rag_groundedness_v1",
+  "description": "Hybrid retrieval + groundedness regression set covering core traditional astrology topics in EN/TR.",
+  "cases": [
+    {
+      "case_id": "almuten_definition_en",
+      "name": "Almuten Figuris definition",
+      "request": {
+        "query": "Explain the Almuten Figuris and why it leads chart synthesis",
+        "locale_settings": {"locale": "en-US", "user_level": "intermediate"},
+        "mode_settings": {"mode": "definition"},
+        "constraints": {"max_latency_ms": 1500},
+        "birth_data": {
+          "date": "1990-06-15",
+          "time": "14:30",
+          "tz": "Europe/Istanbul",
+          "lat": 41.015137,
+          "lng": 28.97953
+        }
+      },
+      "relevant_documents": ["almuten_001", "dignity_001"],
+      "relevance_scores": {"almuten_001": 3.0, "dignity_001": 1.5},
+      "expected_citations": ["almuten_001", "dignity_001"],
+      "at_k": 5,
+      "tags": ["almuten", "definition", "en"]
+    },
+    {
+      "case_id": "zr_career_en",
+      "name": "Zodiacal Releasing career timing",
+      "request": {
+        "query": "How does Zodiacal Releasing from Spirit show career pivots?",
+        "locale_settings": {"locale": "en-US", "user_level": "advanced"},
+        "mode_settings": {"mode": "technique"},
+        "constraints": {"max_latency_ms": 1600},
+        "birth_data": {
+          "date": "1990-06-15",
+          "time": "14:30",
+          "tz": "Europe/Istanbul",
+          "lat": 41.015137,
+          "lng": 28.97953
+        }
+      },
+      "relevant_documents": ["zr_001", "profection_001", "firdaria_001"],
+      "relevance_scores": {"zr_001": 3.0, "profection_001": 1.5, "firdaria_001": 1.0},
+      "expected_citations": ["zr_001", "profection_001"],
+      "at_k": 6,
+      "tags": ["timing", "zodiacal_releasing", "en"]
+    },
+    {
+      "case_id": "antiscia_concepts_en",
+      "name": "Antiscia and contra-antiscia concepts",
+      "request": {
+        "query": "What are antiscia and contra-antiscia connections in natal work?",
+        "locale_settings": {"locale": "en-US", "user_level": "intermediate"},
+        "mode_settings": {"mode": "definition"},
+        "constraints": {"max_latency_ms": 1500},
+        "birth_data": {
+          "date": "1990-06-15",
+          "time": "14:30",
+          "tz": "Europe/Istanbul",
+          "lat": 41.015137,
+          "lng": 28.97953
+        }
+      },
+      "relevant_documents": ["antiscia_001", "almuten_001"],
+      "relevance_scores": {"antiscia_001": 3.0, "almuten_001": 1.0},
+      "expected_citations": ["antiscia_001"],
+      "at_k": 5,
+      "tags": ["antiscia", "definition", "en"]
+    },
+    {
+      "case_id": "sect_orientation_en",
+      "name": "Sect and condition of planets",
+      "request": {
+        "query": "Discuss planetary sect and how it alters strength in charts",
+        "locale_settings": {"locale": "en-US", "user_level": "advanced"},
+        "mode_settings": {"mode": "natal"},
+        "constraints": {"max_latency_ms": 1500},
+        "birth_data": {
+          "date": "1990-06-15",
+          "time": "14:30",
+          "tz": "Europe/Istanbul",
+          "lat": 41.015137,
+          "lng": 28.97953
+        }
+      },
+      "relevant_documents": ["sect_001", "dignity_001"],
+      "relevance_scores": {"sect_001": 3.0, "dignity_001": 1.0},
+      "expected_citations": ["sect_001"],
+      "at_k": 5,
+      "tags": ["sect", "natal", "en"]
+    },
+    {
+      "case_id": "zr_career_tr",
+      "name": "Zodiacal Releasing kariyer yorumu (TR)",
+      "request": {
+        "query": "Zodyak Salımı kariyer dönemlerinde hangi zirveleri işaret eder?",
+        "locale_settings": {"locale": "tr-TR", "user_level": "intermediate"},
+        "mode_settings": {"mode": "technique"},
+        "constraints": {"max_latency_ms": 1600},
+        "birth_data": {
+          "date": "1990-06-15",
+          "time": "14:30",
+          "tz": "Europe/Istanbul",
+          "lat": 41.015137,
+          "lng": 28.97953
+        }
+      },
+      "relevant_documents": ["zr_001", "profection_001"],
+      "relevance_scores": {"zr_001": 3.0, "profection_001": 1.2},
+      "expected_citations": ["zr_001"],
+      "at_k": 6,
+      "tags": ["timing", "zodiacal_releasing", "tr"]
+    }
+  ]
+}

@@ -2,7 +2,7 @@
 from .chart import BirthData, NatalCore, TimingBundle, ScoredTheme, ChartContext
 from .common import ConstraintSettings, SessionContext, ABProfile, LocaleSettings, ModeSettings
 from .interpretation import AnswerBody, AnswerPayload, AnswerSection, TimingWindow, CitationEntry, AnswerMetadata
-from .rag import RAGAnswerRequest, RAGAnswerResponse, PipelineDebugInfo
+from .rag import RAGAnswerRequest, RAGAnswerResponse, PipelineDebugInfo, EvaluationContext
 
 __all__ = [
     "BirthData",
@@ -24,4 +24,5 @@ __all__ = [
     "RAGAnswerRequest",
     "RAGAnswerResponse",
     "PipelineDebugInfo",
+    "EvaluationContext",
 ]

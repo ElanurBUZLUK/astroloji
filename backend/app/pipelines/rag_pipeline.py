@@ -37,6 +37,7 @@ from app.core.llm.provider_pool import LLMProviderPool, ProviderEntry
 from app.core.llm.orchestrator import LLMOrchestrator, RoutingOutcome
 from app.core.llm.strategies.prompt_engineer import PromptEngineer, PromptContext
 from app.core.llm.strategies.auto_repair import AutoRepair
+from app.evaluation.metrics import RAGMetrics
 from app.evaluation.observability import observability
 
 
@@ -48,6 +49,7 @@ class RAGAnswerPipeline:
         semantic_cache: SemanticCache | None = None,
         chart_bootstrapper: ChartBootstrapper | None = None,
     ) -> None:
+        """Instantiate pipeline dependencies, building defaults when not provided."""
         self._cache = semantic_cache or self._build_cache()
         self._chart_bootstrapper = chart_bootstrapper or ChartBootstrapper()
         self._rag = RAGSystem()
@@ -65,6 +67,7 @@ class RAGAnswerPipeline:
         self._last_routing_outcome: Optional[RoutingOutcome] = None
 
     async def run(self, request: RAGAnswerRequest) -> RAGAnswerResponse:
+        """Execute the end-to-end RAG and interpretation workflow for a user query."""
         start_time = time.perf_counter()
         self._last_routing_outcome = None
         cache_key = self._cache_key(request)
@@ -184,6 +187,14 @@ class RAGAnswerPipeline:
                 if citation:
                     citation.span = span_text
 
+        evaluation_metrics = {}
+        if request.evaluation:
+            evaluation_metrics = self._record_benchmark_metrics(
+                request.evaluation,
+                rag_response,
+                payload,
+            )
+
         debug = PipelineDebugInfo(
             intent=request.mode_settings.mode,
             complexity=float(len(main_elements)) / 5.0 if main_elements else 0.1,
@@ -214,6 +225,7 @@ class RAGAnswerPipeline:
                 "timeout_factor": degrade_state.timeout_factor,
                 "cost_actions": degrade_state.cost_actions,
             },
+            evaluation_metrics=evaluation_metrics,
         )
 
         if self._llm_orchestrator:
@@ -240,9 +252,101 @@ class RAGAnswerPipeline:
 
         return response
 
+    def _record_benchmark_metrics(
+        self,
+        evaluation,
+        rag_response,
+        payload: AnswerPayload,
+    ) -> dict[str, float]:
+        """Record retrieval and groundedness metrics when benchmark metadata is present."""
+        rag_metrics = RAGMetrics()
+        retrieved_ids: list[str] = []
+        for doc in rag_response.documents or []:
+            if isinstance(doc, dict):
+                doc_id = doc.get("source_id") or doc.get("doc_id")
+            else:
+                doc_id = getattr(doc, "source_id", None)
+            if doc_id:
+                retrieved_ids.append(str(doc_id))
+
+        relevant_docs = [str(doc_id) for doc_id in (evaluation.relevant_documents or [])]
+        at_k = max(1, evaluation.at_k)
+        precision_at_k = rag_metrics.calculate_precision_at_k(retrieved_ids, relevant_docs, k=at_k)
+        recall_at_k = rag_metrics.calculate_recall_at_k(retrieved_ids, relevant_docs, k=at_k)
+
+        ndcg = 0.0
+        if evaluation.relevance_scores:
+            ndcg = rag_metrics.calculate_ndcg(
+                retrieved_ids,
+                {str(k): v for k, v in evaluation.relevance_scores.items()},
+                k=at_k,
+            )
+
+        citations_payload = []
+        for citation in payload.citations:
+            citations_payload.append(
+                {
+                    "doc_id": citation.doc_id,
+                    "credibility": 0.85 if citation.doc_id in relevant_docs else 0.65,
+                }
+            )
+        groundedness = rag_metrics.calculate_groundedness(
+            payload.answer.general_profile,
+            citations_payload,
+        )
+
+        citation_coverage = None
+        if evaluation.expected_citations:
+            expected_set = {str(doc_id) for doc_id in evaluation.expected_citations}
+            actual_citations = {citation.doc_id for citation in payload.citations}
+            if expected_set:
+                citation_coverage = len(expected_set & actual_citations) / len(expected_set)
+
+        tags = {
+            "benchmark": evaluation.benchmark_id,
+            "case": evaluation.case_id,
+        }
+        observability.metrics.record_histogram(
+            "benchmark_recall_at_k",
+            recall_at_k,
+            tags=tags,
+        )
+        observability.metrics.record_histogram(
+            "benchmark_precision_at_k",
+            precision_at_k,
+            tags=tags,
+        )
+        observability.metrics.record_histogram(
+            "benchmark_groundedness",
+            groundedness,
+            tags=tags,
+        )
+        if ndcg:
+            observability.metrics.record_histogram(
+                "benchmark_ndcg",
+                ndcg,
+                tags=tags,
+            )
+        if citation_coverage is not None:
+            observability.metrics.record_histogram(
+                "benchmark_citation_coverage",
+                citation_coverage,
+                tags=tags,
+            )
+
+        return {
+            "at_k": at_k,
+            "recall_at_k": recall_at_k,
+            "precision_at_k": precision_at_k,
+            "groundedness": groundedness,
+            "ndcg": ndcg,
+            "citation_coverage": citation_coverage,
+        }
+
     def _build_chart_context(
         self, base_context: ChartContext, summary: dict[str, Any]
     ) -> ChartContext:
+        """Augment the base chart context with scored themes from interpretation summary."""
         context = base_context.model_copy(deep=True)
         themes = [
             ScoredTheme(
@@ -265,6 +369,7 @@ class RAGAnswerPipeline:
         evidence_pack: dict,
         degrade_state: DegradeDecision,
     ) -> AnswerPayload:
+        """Assemble the structured answer payload and optionally run LLM revision."""
         strengths = [
             section.content
             for section in interpretation.sections[:2]
@@ -335,12 +440,14 @@ class RAGAnswerPipeline:
         return answer_payload
 
     def _collective_tone_notice(self, evidence_pack: dict, default: Optional[str] = None) -> str:
+        """Pick the collective-tone disclaimer based on detected evidence conflicts."""
         conflicts = evidence_pack.get("conflicts", [])
         if conflicts:
             return "Bu etkiler jenerasyonel veya kolektif tonlar içerir; kişisel düzeyde filtreleyin."
         return default or "Bu yorum, genel astrolojik ilkeler temel alınarak oluşturuldu."
 
     def _cache_key(self, request: RAGAnswerRequest) -> str:
+        """Generate a deterministic cache key from query text and birth fingerprint."""
         birth_fingerprint = {
             "date": request.birth_data.date if request.birth_data else "no-date",
             "time": request.birth_data.time if request.birth_data else "no-time",
@@ -361,6 +468,7 @@ class RAGAnswerPipeline:
     def _build_evidence_pack(
         self, documents: List[dict], main_elements: List[str]
     ) -> dict:
+        """Summarize retrieved documents into diversity and conflict diagnostics."""
         if not documents:
             return {
                 "documents": [],
@@ -453,6 +561,7 @@ class RAGAnswerPipeline:
         }
 
     def _mask_request_for_audit(self, request: RAGAnswerRequest) -> Dict[str, Any]:
+        """Strip PII from the incoming request before logging or auditing."""
         masked_birth = None
         if request.birth_data:
             masked_birth = {
@@ -472,6 +581,7 @@ class RAGAnswerPipeline:
         }
 
     def _classify_tone(self, content: str, metadata: Dict[str, Any]) -> str:
+        """Heuristically label a document snippet as supportive, challenging, or neutral."""
         if not content:
             return "neutral"
         text = content.lower()
@@ -494,6 +604,7 @@ class RAGAnswerPipeline:
     def _evaluate_coverage(
         self, main_elements: List[str], documents: List[dict], mode: str
     ) -> dict:
+        """Score how well retrieved documents cover the requested chart elements."""
         if not documents:
             return {
                 "pass": False,
@@ -576,6 +687,7 @@ class RAGAnswerPipeline:
         response: RAGAnswerResponse,
         coverage: Dict[str, Any],
     ) -> None:
+        """Emit a structured audit log for monitoring interpretation quality."""
         record = {
             "request": masked_request,
             "coverage": coverage,
@@ -589,6 +701,7 @@ class RAGAnswerPipeline:
     async def _execute_plan(
         self, plan: List[PlanStep], chart_data: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
+        """Run planner steps against connectors to fetch supplemental documents."""
         supplemental_docs: List[Dict[str, Any]] = []
         for step in plan:
             if step.step_type == "kg":
@@ -607,6 +720,7 @@ class RAGAnswerPipeline:
         chart_data: Dict[str, Any],
         request: RAGAnswerRequest,
     ) -> List[PlanStep]:
+        """Expand retrieval with planner hops while respecting latency budgets."""
         max_budget_ms = min(request.constraints.max_latency_ms or 1500, 1500)
         spent_ms = 0
         hops: List[PlanStep] = []
@@ -626,6 +740,7 @@ class RAGAnswerPipeline:
         return hops
 
     def _map_mode(self, mode: str) -> OutputMode:
+        """Translate pipeline mode strings into enumerated output modes."""
         mapping = {
             "natal": OutputMode.NATAL,
             "transit": OutputMode.TODAY,
@@ -637,6 +752,7 @@ class RAGAnswerPipeline:
         return mapping.get(mode, OutputMode.NATAL)
 
     def _map_style(self, user_level: str) -> OutputStyle:
+        """Map user skill level to the desired narrative style."""
         mapping = {
             "beginner": OutputStyle.ACCESSIBLE,
             "intermediate": OutputStyle.ACCESSIBLE,
@@ -652,6 +768,7 @@ class RAGAnswerPipeline:
         alignment: Optional[dict] = None,
         degrade: Optional[DegradeDecision] = None,
     ) -> List[str]:
+        """Compile warnings or mitigations to surface alongside the answer."""
         notes: List[str] = []
         if not payload.citations:
             notes.append("No citations attached; coverage considered partial.")
@@ -702,6 +819,7 @@ class RAGAnswerPipeline:
         rag_response: Any,
         degrade_state: DegradeDecision,
     ) -> Optional[AnswerPayload]:
+        """Route through the LLM orchestrator to revise the payload when allowed."""
         if not self._llm_orchestrator:
             return None
         try:
@@ -818,10 +936,12 @@ class RAGAnswerPipeline:
             return None
 
     async def close(self) -> None:
+        """Close any underlying provider pools that require cleanup."""
         if self._llm_pool:
             await self._llm_pool.close()
 
     def _style_from_request(self, request: RAGAnswerRequest) -> str:
+        """Derive prompt tone from AB profile and locale preferences."""
         if request.ab_flags.profile == "cost-first":
             return "brief"
         if request.ab_flags.profile == "quality-first":
@@ -833,12 +953,14 @@ class RAGAnswerPipeline:
         return "accessible"
 
     def _track_metric(self, name: str, value: float) -> None:
+        """Record observability metrics defensively to avoid cascading failures."""
         try:
             observability.metrics.record_histogram(name, value)
         except Exception:
             pass
 
     def _extract_cost_usd(self, outcome: Optional[RoutingOutcome]) -> Optional[float]:
+        """Pull provider cost information from routing outcomes when exposed."""
         if not outcome or not outcome.response:
             return None
         raw = outcome.response.raw or {}
@@ -859,6 +981,7 @@ class RAGAnswerPipeline:
         return None
 
     def _build_cache(self) -> SemanticCache:
+        """Create the semantic cache backend, falling back to in-memory storage."""
         try:
             return RedisSemanticCache(
                 redis_url=settings.redis_url,
@@ -868,6 +991,7 @@ class RAGAnswerPipeline:
             return SemanticCache()
 
     def _build_llm_pool(self) -> Optional[LLMProviderPool]:
+        """Initialize provider pool with primary and optional fallback OpenAI entries."""
         api_key = getattr(settings, "OPENAI_API_KEY", None)
         default_model = getattr(settings, "OPENAI_MODEL_DEFAULT", None)
         fallback_model = getattr(settings, "OPENAI_MODEL_FALLBACK", None)

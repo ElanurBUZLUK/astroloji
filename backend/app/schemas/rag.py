@@ -9,6 +9,19 @@ from app.schemas.common import ConstraintSettings, SessionContext, ABProfile, Lo
 from app.schemas.interpretation import AnswerPayload
 
 
+class EvaluationContext(BaseModel):
+    """Metadata allowing the pipeline to emit evaluation metrics."""
+
+    benchmark_id: str = Field(..., max_length=64)
+    case_id: str = Field(..., max_length=64)
+    relevant_documents: list[str] = Field(default_factory=list)
+    relevance_scores: dict[str, float] = Field(default_factory=dict)
+    expected_citations: list[str] = Field(default_factory=list)
+    at_k: int = Field(default=10, ge=1, le=50)
+    reference_answer: Optional[str] = None
+    tags: list[str] = Field(default_factory=list)
+
+
 class RAGAnswerRequest(BaseModel):
     """Top level request contract for /rag/answer."""
 
@@ -19,6 +32,7 @@ class RAGAnswerRequest(BaseModel):
     constraints: ConstraintSettings = Field(default_factory=ConstraintSettings)
     ab_flags: ABProfile = Field(default_factory=ABProfile)
     session: SessionContext = Field(default_factory=SessionContext)
+    evaluation: Optional[EvaluationContext] = None
 
 
 class PipelineDebugInfo(BaseModel):
@@ -35,6 +49,7 @@ class PipelineDebugInfo(BaseModel):
     claim_alignment: dict = Field(default_factory=dict)
     degrade: dict = Field(default_factory=dict)
     routing: dict = Field(default_factory=dict)
+    evaluation_metrics: dict = Field(default_factory=dict)
 
 
 class RAGAnswerResponse(BaseModel):
