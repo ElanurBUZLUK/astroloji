@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 import os
 import re
 import uuid
+from pathlib import Path
 
 from loguru import logger
 
@@ -39,6 +40,11 @@ try:  # pragma: no cover - optional dependency imports
 except Exception:  # pragma: no cover
     OpenSearch = None
     bulk = None
+
+try:  # pragma: no cover - optional dependency imports
+    import chromadb
+except Exception:  # pragma: no cover
+    chromadb = None
 
 class RetrievalMethod(Enum):
     """Retrieval methods"""
@@ -331,6 +337,137 @@ class MockSparseStore(SparseStore):
             return asyncio.run(self.search(query_text, top_k, filters))
         else:
             raise RuntimeError("search_sparse cannot be called from an active event loop")
+
+class ChromaVectorStore(VectorStore):
+    """ChromaDB backed vector store with persistent storage."""
+
+    def __init__(self, persist_path: str, collection: str, fetch_k: int = 10) -> None:
+        if chromadb is None:
+            raise RuntimeError("chromadb library not available")
+        self.persist_path = Path(persist_path).expanduser()
+        self.persist_path.mkdir(parents=True, exist_ok=True)
+        self.client = chromadb.PersistentClient(path=str(self.persist_path))
+        self.collection = self.client.get_or_create_collection(
+            name=collection,
+            metadata={"hnsw:space": "cosine"},
+        )
+        self.fetch_k = max(1, int(fetch_k))
+
+    def is_empty(self) -> bool:
+        try:
+            return self.collection.count() == 0
+        except Exception:  # pragma: no cover - defensive
+            return False
+
+    async def search(
+        self,
+        query_vector: List[float],
+        top_k: int = 10,
+        filters: Dict[str, Any] | None = None,
+    ) -> List[RetrievalResult]:
+        return await asyncio.to_thread(self._search, query_vector, top_k, filters)
+
+    def _search(
+        self,
+        query_vector: List[float],
+        top_k: int,
+        filters: Dict[str, Any] | None,
+    ) -> List[RetrievalResult]:
+        where_clause = self._build_filters(filters)
+        include = ["documents", "metadatas", "distances", "ids"]
+        results = self.collection.query(
+            query_embeddings=[query_vector],
+            n_results=max(1, top_k),
+            where=where_clause,
+            search_type="mmr",
+            search_params={"fetch_k": max(self.fetch_k, top_k)},
+            include=include,
+        )
+        documents = (results.get("documents") or [[]])[0]
+        metadatas = (results.get("metadatas") or [[]])[0]
+        distances = (results.get("distances") or [[]])[0]
+        ids = (results.get("ids") or [[]])[0]
+        retrievals: List[RetrievalResult] = []
+        for idx, content in enumerate(documents or []):
+            metadata_raw = metadatas[idx] if idx < len(metadatas) else {}
+            metadata = dict(metadata_raw) if isinstance(metadata_raw, dict) else {}
+            source_id = ids[idx] if idx < len(ids) else metadata.get("chunk_id") or metadata.get("doc_id") or f"chunk-{idx}"
+            metadata.setdefault("chunk_id", source_id)
+            metadata.setdefault("doc_id", metadata.get("doc_id") or source_id)
+            distance = float(distances[idx]) if idx < len(distances) else 1.0
+            score = max(0.0, 1.0 - distance)
+            retrievals.append(
+                RetrievalResult(
+                    content=content,
+                    score=score,
+                    source_id=str(source_id),
+                    metadata=metadata,
+                    method=RetrievalMethod.DENSE,
+                )
+            )
+        return retrievals
+
+    async def add_documents(self, documents: List[Dict[str, Any]]) -> bool:
+        await asyncio.to_thread(self._upsert_documents, documents)
+        return True
+
+    def _upsert_documents(self, documents: List[Dict[str, Any]]) -> None:
+        if not documents:
+            return
+        items: List[Tuple[str, str, Dict[str, Any]]] = []
+        for doc in documents:
+            doc_id = doc.get("id") or str(uuid.uuid4())
+            metadata = dict(doc.get("metadata") or {})
+            metadata.setdefault("chunk_id", doc_id)
+            metadata.setdefault("doc_id", metadata.get("doc_id") or doc_id)
+            items.append((doc_id, doc.get("content", ""), metadata))
+        self.upsert(items)
+
+    def upsert(self, items: List[Tuple[str, str, Dict[str, Any]]]) -> None:
+        if not items:
+            return
+        ids: List[str] = []
+        documents: List[str] = []
+        metadatas: List[Dict[str, Any]] = []
+        embeddings: List[List[float]] = []
+        for doc_id, content, metadata in items:
+            chunk_id = doc_id or str(uuid.uuid4())
+            record = dict(metadata or {})
+            record.setdefault("chunk_id", chunk_id)
+            record.setdefault("doc_id", record.get("doc_id") or chunk_id)
+            ids.append(str(chunk_id))
+            documents.append(content)
+            metadatas.append(record)
+            embeddings.append(generate_embedding(content))
+        self.collection.upsert(
+            ids=ids,
+            documents=documents,
+            metadatas=metadatas,
+            embeddings=embeddings,
+        )
+
+    def search_dense(
+        self, query: str, top_k: int = 10, filters: Dict[str, Any] | None = None
+    ) -> List[RetrievalResult]:
+        query_vector = generate_embedding(query)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return self._search(query_vector, top_k, filters)
+        else:
+            raise RuntimeError("search_dense cannot be called from an active event loop")
+
+    @staticmethod
+    def _build_filters(filters: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        if not filters:
+            return None
+        where: Dict[str, Any] = {}
+        for key, value in filters.items():
+            if isinstance(value, list):
+                where[key] = {"$in": value}
+            else:
+                where[key] = {"$eq": value}
+        return where
 
 
 class QdrantVectorStore(VectorStore):
@@ -712,14 +849,44 @@ def _secret_value(secret: Optional[Any]) -> str:
 def build_retriever_profile() -> Dict[str, Optional[Any]]:
     """Construct vector/sparse store instances based on configuration/env."""
 
-    default_backend = getattr(settings, "SEARCH_BACKEND", "HYBRID") or "HYBRID"
+    default_backend = getattr(settings, "SEARCH_BACKEND", "CHROMA") or "CHROMA"
     backend_choice = (os.getenv("SEARCH_BACKEND") or default_backend).upper()
-    if backend_choice not in {"QDRANT", "OPENSEARCH", "HYBRID", ""}:
+    valid_backends = {
+        "",
+        "CHROMA",
+        "QDRANT",
+        "OPENSEARCH",
+        "HYBRID",
+        "CHROMA_OPENSEARCH",
+        "QDRANT_OPENSEARCH",
+    }
+    if backend_choice not in valid_backends:
         logger.warning("Unsupported SEARCH_BACKEND '%s', falling back to HYBRID", backend_choice)
         backend_choice = "HYBRID"
 
     dense_store: Optional[VectorStore] = None
     sparse_store: Optional[SparseStore] = None
+
+    def create_chroma() -> Optional[VectorStore]:
+        if chromadb is None:
+            logger.warning("Chroma library unavailable; skipping dense store")
+            return None
+        persist_path = os.getenv("CHROMA_PERSIST_PATH", getattr(settings, "CHROMA_PERSIST_PATH", "data/processed/vector_store"))
+        collection = os.getenv("CHROMA_COLLECTION", getattr(settings, "CHROMA_COLLECTION", "astro_knowledge"))
+        fetch_k = os.getenv("CHROMA_FETCH_K", getattr(settings, "CHROMA_FETCH_K", 10))
+        try:
+            fetch_value = int(fetch_k)
+        except (TypeError, ValueError):
+            fetch_value = 10
+        try:
+            store = ChromaVectorStore(persist_path=persist_path, collection=collection, fetch_k=fetch_value)
+            return store
+        except Exception as exc:  # pragma: no cover - external dependency
+            logger.warning(
+                "Failed to initialise Chroma store",
+                extra={"path": persist_path, "collection": collection, "error": str(exc)},
+            )
+            return None
 
     def create_qdrant() -> Optional[VectorStore]:
         if QdrantClient is None:
@@ -761,10 +928,17 @@ def build_retriever_profile() -> Dict[str, Optional[Any]]:
             )
             return None
 
-    if backend_choice in {"", "HYBRID", "QDRANT"}:
+    if backend_choice in {"", "HYBRID", "CHROMA", "CHROMA_OPENSEARCH"}:
+        dense_store = create_chroma()
+    if dense_store is None and backend_choice in {"", "HYBRID", "QDRANT", "QDRANT_OPENSEARCH"}:
         dense_store = create_qdrant()
-    if backend_choice in {"", "HYBRID", "OPENSEARCH"}:
+    if backend_choice in {"", "HYBRID", "OPENSEARCH", "CHROMA_OPENSEARCH", "QDRANT_OPENSEARCH"}:
         sparse_store = create_opensearch()
+
+    # Seed fallback content for local/dev scenarios where the vector store is empty.
+    if isinstance(dense_store, ChromaVectorStore) and dense_store.is_empty():
+        logger.info("Chroma vector store empty; using mock knowledge base for development.")
+        dense_store = MockVectorStore()
 
     # Allow hybrid mode when Qdrant is primary but OpenSearch settings exist
     if backend_choice == "QDRANT" and sparse_store is None and (

@@ -1,6 +1,7 @@
 """Application configuration layer."""
 from __future__ import annotations
 
+import os
 from typing import ClassVar, Dict, List, Sequence
 
 from pydantic import AnyHttpUrl, Field, SecretStr, ValidationError
@@ -22,11 +23,15 @@ class Settings(BaseSettings):
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
     ALLOWED_ORIGINS: str = "http://localhost:3000"
+    MASTER_PROMPT_PATH: str = "backend/app/prompts/master_prompt.yaml"
+    MASTER_PROMPT_DEPLOY_PATH: str | None = None
 
     # Security
     SECRET_KEY: SecretStr = SecretStr(
         "astro-aa-super-secret-key-change-this-in-production-2025"
     )
+    RAG_API_KEYS: str = "dev-astro-key"
+    RAG_RATE_LIMIT_PER_MINUTE: int = 10
 
     # Persistence & cache
     POSTGRES_URL: str = (
@@ -36,7 +41,7 @@ class Settings(BaseSettings):
     SEMANTIC_CACHE_TTL: int = 604800
     CACHE_TTL_SECONDS: int = 3600
     SWISSEPH_DATA_PATH: str | None = None
-    SEARCH_BACKEND: str = "QDRANT"
+    SEARCH_BACKEND: str = "CHROMA"
     BM25_LANGUAGE: str = "turkish"
     HOROSCOPE_MODEL_DIR: str | None = "models/random_forest_v1.0.0"
     HOROSCOPE_RATE_LIMIT_PER_MINUTE: int = 10
@@ -46,6 +51,9 @@ class Settings(BaseSettings):
     QDRANT_URL: AnyHttpUrl = Field("http://localhost:6333")
     QDRANT_API_KEY: SecretStr | None = None
     QDRANT_COLLECTION: str = "astro_knowledge"
+    CHROMA_PERSIST_PATH: str = "data/processed/vector_store"
+    CHROMA_COLLECTION: str = "astro_knowledge"
+    CHROMA_FETCH_K: int = 10
     OPENSEARCH_URL: AnyHttpUrl | None = Field("http://localhost:9200")
     OPENSEARCH_USER: str = "admin"
     OPENSEARCH_PASSWORD: SecretStr | None = SecretStr("admin")
@@ -88,11 +96,7 @@ class Settings(BaseSettings):
     LLM_ROUTER_LARGE_PROVIDER: str = "fallback_openai"
     LLM_ROUTER_LARGE_MODEL: str = "gpt-4o-mini"
 
-    REQUIRED_ENV_VARS: ClassVar[Sequence[str]] = (
-        "OPENAI_API_KEY",
-        "QDRANT_URL",
-        "QDRANT_COLLECTION",
-    )
+    REQUIRED_ENV_VARS: ClassVar[Sequence[str]] = ("OPENAI_API_KEY",)
 
     @property
     def app_name(self) -> str:
@@ -111,12 +115,31 @@ class Settings(BaseSettings):
         return [origin.strip() for origin in self.ALLOWED_ORIGINS.split(",") if origin.strip()]
 
     @property
+    def rag_api_key_list(self) -> List[str]:
+        raw = self.RAG_API_KEYS
+        if isinstance(raw, str):
+            return [item.strip() for item in raw.split(",") if item.strip()]
+        if isinstance(raw, (list, tuple)):
+            return [str(item).strip() for item in raw if str(item).strip()]
+        if isinstance(raw, set):
+            return [str(item).strip() for item in raw]
+        return []
+
+    @property
     def redis_url(self) -> str:
         return self.REDIS_URL
 
     def validate_environment(self) -> None:
         missing: List[str] = []
-        for key in self.REQUIRED_ENV_VARS:
+        required = set(self.REQUIRED_ENV_VARS)
+
+        backend_choice = (os.getenv("SEARCH_BACKEND") or self.SEARCH_BACKEND or "").upper()
+        if "QDRANT" in backend_choice:
+            required.update({"QDRANT_URL", "QDRANT_COLLECTION"})
+        if "OPENSEARCH" in backend_choice:
+            required.add("OPENSEARCH_URL")
+
+        for key in required:
             value = getattr(self, key, None)
             if value is None:
                 missing.append(key)
@@ -150,12 +173,16 @@ class Settings(BaseSettings):
             "use_embedding_model": self.USE_EMBEDDING_MODEL,
             "reranker_model": self.RERANKER_MODEL,
             "search_backend": self.SEARCH_BACKEND,
+            "chroma_persist_path": self.CHROMA_PERSIST_PATH,
+            "chroma_collection": self.CHROMA_COLLECTION,
             "bm25_language": self.BM25_LANGUAGE,
             "opensearch_url": str(self.OPENSEARCH_URL) if self.OPENSEARCH_URL else None,
             "opensearch_index": self.OPENSEARCH_INDEX,
             "hybrid_alpha": self.HYBRID_ALPHA,
             "horoscope_model_dir": self.HOROSCOPE_MODEL_DIR,
             "mlflow_tracking_uri": self.MLFLOW_TRACKING_URI,
+            "rag_rate_limit_per_minute": self.RAG_RATE_LIMIT_PER_MINUTE,
+            "rag_api_keys_configured": len(self.rag_api_key_list),
         }
         summary["openai_api_key"] = (
             "***redacted***"

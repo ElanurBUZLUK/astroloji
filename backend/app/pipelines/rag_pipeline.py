@@ -36,6 +36,11 @@ from app.pipelines.sanitization import (
     apply_answer_safeguards,
 )
 from app.pipelines.degrade import DegradePolicyManager, DegradeDecision
+from app.pipelines.quality_control import (
+    AnswerQualityFilter,
+    TemplateFallbackBuilder,
+    AnswerQualityReport,
+)
 from backend.app.config import settings
 from app.pipelines.chart_builder import ChartBootstrapper
 from app.core.llm.providers.openai import OpenAIProvider
@@ -43,6 +48,7 @@ from app.core.llm.provider_pool import LLMProviderPool, ProviderEntry
 from app.core.llm.orchestrator import LLMOrchestrator, RoutingOutcome
 from app.core.llm.strategies.prompt_engineer import PromptEngineer, PromptContext
 from app.core.llm.strategies.auto_repair import AutoRepair
+from app.evaluation import prometheus_bridge
 from app.evaluation.metrics import RAGMetrics
 from app.evaluation.observability import observability
 
@@ -74,6 +80,10 @@ class RAGAnswerPipeline:
         self._retriever_profile = build_retriever_profile()
         self._dense_store = self._retriever_profile.get("dense")
         self._sparse_store = self._retriever_profile.get("sparse")
+        self._quality_filter = AnswerQualityFilter()
+        self._fallback_builder = TemplateFallbackBuilder()
+        self._last_quality_report: Optional[AnswerQualityReport] = None
+        self._quality_fallback_issues: Optional[List[str]] = None
 
     async def run(self, request: RAGAnswerRequest) -> RAGAnswerResponse:
         """Execute the end-to-end RAG and interpretation workflow for a user query."""
@@ -118,6 +128,7 @@ class RAGAnswerPipeline:
         observability.metrics.set_gauge(
             "rag_degrade_active", 1.0 if degrade_state.active else 0.0
         )
+        prometheus_bridge.set_degrade_active(degrade_state.active)
 
         rag_policy = degrade_state.rag_overrides if degrade_state.active else None
         rag_response = await self._rag.query_for_interpretation(
@@ -126,7 +137,8 @@ class RAGAnswerPipeline:
 
         base_query = getattr(request, "query", "") or ""
         hybrid_query = (" ".join(main_elements[:3]) or base_query or "astroloji yorum")
-        top_k_policy = max(1, int(rag_policy.get("top_k", 8)) if rag_policy else 8)
+        policy_top_k = rag_policy.get("top_k") if rag_policy else None
+        top_k_policy = max(1, int(policy_top_k or 5))
         await self._hydrate_documents_with_hybrid(
             hybrid_query,
             top_k_policy,
@@ -219,7 +231,13 @@ class RAGAnswerPipeline:
             retrieval_stats=rag_response.retrieval_stats or {},
             rerank_stats=rag_response.reranking_stats or {},
             guardrail_notes=self._guardrail_notes(
-                payload, coverage, evidence_pack, alignment_result, degrade_state
+                payload,
+                coverage,
+                evidence_pack,
+                alignment_result,
+                degrade_state,
+                quality=self._last_quality_report,
+                fallback_issues=self._quality_fallback_issues,
             ),
             coverage=coverage,
             evidence={"diversity": evidence_pack.get("diversity", {}), "conflict_count": len(evidence_pack.get("conflicts", []))},
@@ -262,6 +280,7 @@ class RAGAnswerPipeline:
         await self._cache.set(cache_key, response, ttl_factor=cache_ttl_factor)
 
         elapsed_ms = int((time.perf_counter() - start_time) * 1000)
+        prometheus_bridge.record_rag_latency(request.mode_settings.mode, elapsed_ms / 1000.0)
         response.payload.limits.processing_time_ms = elapsed_ms
         response.payload.limits.latency_budget_ms = request.constraints.max_latency_ms
         observability.metrics.record_histogram("rag_latency", elapsed_ms)
@@ -410,7 +429,7 @@ class RAGAnswerPipeline:
         doc_content_map: Dict[str, str] = {}
         for doc in rag_response.documents or []:
             metadata = doc.get("metadata") or {}
-            primary_id = metadata.get("doc_id") or doc.get("source_id")
+            primary_id = metadata.get("chunk_id") or metadata.get("doc_id") or doc.get("source_id")
             if primary_id:
                 doc_meta_map[primary_id] = metadata
                 doc_content_map[primary_id] = doc.get("content", "")
@@ -515,6 +534,35 @@ class RAGAnswerPipeline:
             if llm_revision:
                 answer_payload = llm_revision
                 apply_answer_safeguards(answer_payload.answer)
+
+        quality_report = self._quality_filter.evaluate(answer_payload)
+        if quality_report.issues:
+            prometheus_bridge.record_quality_issues(quality_report.issues)
+        self._last_quality_report = quality_report
+        self._quality_fallback_issues = None
+        if not quality_report.passed:
+            self._quality_fallback_issues = list(quality_report.issues)
+            prometheus_bridge.record_quality_fallback(self._quality_fallback_issues)
+            self._logger.warning(
+                "Answer quality filter triggered",
+                extra={"issues": quality_report.issues},
+            )
+            answer_payload = self._fallback_builder.build(
+                request=request,
+                interpretation_summary=interpretation_summary,
+                rag_response=rag_response,
+                base_payload=answer_payload,
+                issues=quality_report.issues,
+                coverage=coverage,
+            )
+            apply_answer_safeguards(answer_payload.answer)
+            quality_report = self._quality_filter.evaluate(answer_payload)
+            self._last_quality_report = quality_report
+            if not quality_report.passed:
+                self._logger.error(
+                    "Fallback payload still failed quality filter",
+                    extra={"issues": quality_report.issues},
+                )
 
         return answer_payload
 
@@ -830,6 +878,7 @@ class RAGAnswerPipeline:
         for res in limited:
             metadata = dict(res.metadata or {})
             metadata.setdefault("doc_id", metadata.get("doc_id") or res.source_id)
+            metadata.setdefault("chunk_id", metadata.get("chunk_id") or res.source_id)
             documents.append(
                 {
                     "content": res.content,
@@ -913,6 +962,8 @@ class RAGAnswerPipeline:
         evidence_pack: dict,
         alignment: Optional[dict] = None,
         degrade: Optional[DegradeDecision] = None,
+        quality: Optional[AnswerQualityReport] = None,
+        fallback_issues: Optional[List[str]] = None,
     ) -> List[str]:
         """Compile warnings or mitigations to surface alongside the answer."""
         notes: List[str] = []
@@ -931,6 +982,14 @@ class RAGAnswerPipeline:
             latency_flag = degrade.flags.get("latency_p95_ms") if degrade.flags else None
             if latency_flag:
                 notes.append(f"Observed rag_latency_p95={latency_flag} ms during degrade window.")
+        if quality and not quality.passed:
+            notes.append(
+                "Quality filter flagged: " + ", ".join(quality.issues)
+            )
+        if fallback_issues:
+            notes.append(
+                "Template fallback served due to: " + ", ".join(fallback_issues)
+            )
         alignment_score = getattr(payload.limits, "citation_alignment", None)
         if alignment_score is not None and alignment_score < 0.75:
             notes.append(

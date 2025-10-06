@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends
 
 from app.pipelines.rag_pipeline import RAGAnswerPipeline
 from app.schemas import RAGAnswerRequest, RAGAnswerResponse
+from backend.app.security.api_key import require_api_key
 
 
 router = APIRouter(prefix="/v1/rag", tags=["rag"])
@@ -18,6 +19,7 @@ def get_pipeline() -> RAGAnswerPipeline:
 @router.post("/answer", response_model=RAGAnswerResponse)
 async def create_rag_answer(
     request: RAGAnswerRequest,
+    _: str = Depends(require_api_key),
     pipeline: RAGAnswerPipeline = Depends(get_pipeline),
 ) -> RAGAnswerResponse:
     """Run the end-to-end pipeline and return a structured answer."""

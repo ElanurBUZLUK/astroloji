@@ -20,6 +20,7 @@ help:
 	@echo "  ingest-qdrant    Ingest markdown/text corpus into Qdrant"
 	@echo "  ingest-opensearch Ingest markdown/text corpus into OpenSearch"
 	@echo "  eval-hybrid  Evaluate dense/sparse/hybrid retrieval (configure EVAL_FILE)"
+	@echo "  go-no-go     Run go/no-go acceptance checks"
 
 install:
 	cd $(BACKEND_DIR) && pip install -r requirements.txt
@@ -56,3 +57,6 @@ ingest-opensearch:
 
 eval-hybrid:
 	cd $(BACKEND_DIR) && python scripts/run_eval_hybrid.py --file $(EVAL_FILE) --k $(EVAL_K) --alpha $${ALPHA:-0.6}
+
+go-no-go:
+	cd $(BACKEND_DIR) && pytest -q tests/test_go_no_go.py

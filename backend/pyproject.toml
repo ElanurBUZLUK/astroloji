@@ -27,7 +27,9 @@ dependencies = [
     "pyepheus==2.10.3.2",
     "swisseph==2.10.03.2",
     "python-dateutil==2.8.2",
-    "pytz==2023.3"
+    "pytz==2023.3",
+    "chromadb==0.4.24",
+    "PyYAML==6.0.1"
 ]
 
 [project.optional-dependencies]

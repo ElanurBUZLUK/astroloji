@@ -12,7 +12,11 @@ def test_rag_answer_smoke():
         "mode_settings": {"mode": "natal"},
     }
 
-    response = client.post("/v1/rag/answer", json=payload)
+    response = client.post(
+        "/v1/rag/answer",
+        json=payload,
+        headers={"X-API-Key": "dev-astro-key"},
+    )
     assert response.status_code == 200
     data = response.json()
 

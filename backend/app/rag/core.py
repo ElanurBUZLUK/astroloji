@@ -24,7 +24,7 @@ class RAGQuery:
     """Complete RAG query with all parameters"""
     query: str
     context: Dict[str, Any] = None
-    top_k: int = 10
+    top_k: int = 5
     expand_query: bool = True
     rerank_results: bool = True
     include_citations: bool = True
@@ -222,7 +222,7 @@ class RAGSystem:
         elif any("profection" in elem.lower() for elem in chart_elements):
             filters["topic"] = "profection"
         
-        top_k = int(policy.get("top_k", 8) or 8)
+        top_k = int(policy.get("top_k", 5) or 5)
         top_k = max(1, top_k)
         expand_query = bool(policy.get("expand_query", True))
         rerank_results = bool(policy.get("rerank_results", True))

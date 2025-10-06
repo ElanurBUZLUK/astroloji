@@ -110,19 +110,22 @@ def main() -> None:
             raw_text = doc_path.read_text(encoding="utf-8", errors="ignore")
         sections = split_chunks(raw_text, args.chunk, args.overlap)
         for section_idx, (chunk, line_start, line_end) in enumerate(sections):
+            chunk_id = f"{doc_path.stem}__{section_idx:04d}"
             metadata = {
                 "doc_id": doc_path.stem,
-                "section": section_idx,
+                "chunk_id": chunk_id,
+                "chunk_index": section_idx,
                 "line_start": line_start,
                 "line_end": line_end,
                 "tradition": default_tradition,
                 "language": language,
                 "source_url": None,
+                "source_path": str(doc_path.relative_to(corpus_root)),
             }
             heading = _first_heading(chunk)
             if heading:
                 metadata["section_title"] = heading
-            batch.append((doc_path.stem, chunk, metadata))
+            batch.append((chunk_id, chunk, metadata))
 
     if not batch:
         print("No documents discovered; nothing to ingest.")

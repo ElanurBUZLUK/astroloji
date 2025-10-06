@@ -10,6 +10,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from ..evaluation.observability import observability
+from app.evaluation.prometheus_bridge import record_api_request
 
 class ObservabilityMiddleware(BaseHTTPMiddleware):
     """Middleware to automatically collect observability metrics"""
@@ -45,6 +46,12 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
                 response_time=response_time,
                 user_id=user_id
             )
+            record_api_request(
+                method=method,
+                endpoint=path,
+                status=response.status_code,
+                latency_seconds=response_time,
+            )
             
             # Add response headers
             response.headers["X-Request-ID"] = request_id
@@ -63,6 +70,12 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
                 status_code=500,
                 response_time=response_time,
                 user_id=user_id
+            )
+            record_api_request(
+                method=method,
+                endpoint=path,
+                status=500,
+                latency_seconds=response_time,
             )
             
             # Re-raise the exception

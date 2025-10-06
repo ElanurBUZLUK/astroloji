@@ -32,3 +32,5 @@ scikit-learn==1.4.2
 sentence-transformers==2.7.0
 xgboost==2.0.3
 tenacity==8.2.3
+chromadb==0.4.24
+pyyaml==6.0.1

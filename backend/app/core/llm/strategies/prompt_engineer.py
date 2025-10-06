@@ -4,6 +4,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List
 
+from app.prompts import get_master_prompt_loader, MasterPromptLoader
+
 
 @dataclass
 class PromptContext:
@@ -18,16 +20,24 @@ class PromptContext:
 class PromptEngineer:
     """Builds prompts according to style and coverage signals."""
 
+    def __init__(self, prompt_loader: MasterPromptLoader | None = None) -> None:
+        self._master_loader = prompt_loader or get_master_prompt_loader()
+
     def build_messages(self, summary: str, context: PromptContext) -> List[Dict[str, str]]:
         """Compose system and user messages tailored to the provided context."""
-        system_prompt = self._system_prompt(context)
+        master_prompt = self._master_loader.load()
+        messages: List[Dict[str, str]] = []
+        if master_prompt.system:
+            messages.append({"role": "system", "content": master_prompt.system})
+        if master_prompt.developer:
+            messages.append({"role": "developer", "content": master_prompt.developer})
+        contextual_prompt = self._context_prompt(context)
         user_prompt = self._user_prompt(summary, context)
-        return [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ]
+        messages.append({"role": "system", "content": contextual_prompt})
+        messages.append({"role": "user", "content": user_prompt})
+        return messages
 
-    def _system_prompt(self, context: PromptContext) -> str:
+    def _context_prompt(self, context: PromptContext) -> str:
         """Build a system message that encodes tone, language, and safety guidance."""
         base = {
             "en": "You are an expert astrologer who writes grounded, cited analysis.",
