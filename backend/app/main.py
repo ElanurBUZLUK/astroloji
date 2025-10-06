@@ -7,7 +7,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 
-from backend.app.api import admin, alerts, auth, charts, interpretations
+from backend.app.api import admin, alerts, auth, charts, horoscope, interpretations
 from backend.app.api.v1 import api_router as api_v1_router
 from backend.app.config import settings
 from backend.app.evaluation.observability import observability
@@ -58,6 +58,7 @@ def create_app() -> FastAPI:
     app.include_router(api_v1_router)
     app.include_router(auth.router, prefix="/auth", tags=["auth"])
     app.include_router(charts.router, prefix="/charts", tags=["charts"])
+    app.include_router(horoscope.router)
     app.include_router(interpretations.router, prefix="/interpretations", tags=["interpretations"])
     app.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
     app.include_router(admin.router, prefix="/admin", tags=["admin"])

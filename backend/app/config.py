@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     SWISSEPH_DATA_PATH: str | None = None
     SEARCH_BACKEND: str = "QDRANT"
     BM25_LANGUAGE: str = "turkish"
+    HOROSCOPE_MODEL_DIR: str | None = "models/random_forest_v1.0.0"
+    HOROSCOPE_RATE_LIMIT_PER_MINUTE: int = 10
+    MLFLOW_TRACKING_URI: str | None = "sqlite:///mlruns.db"
 
     # Vector store
     QDRANT_URL: AnyHttpUrl = Field("http://localhost:6333")
@@ -151,6 +154,8 @@ class Settings(BaseSettings):
             "opensearch_url": str(self.OPENSEARCH_URL) if self.OPENSEARCH_URL else None,
             "opensearch_index": self.OPENSEARCH_INDEX,
             "hybrid_alpha": self.HYBRID_ALPHA,
+            "horoscope_model_dir": self.HOROSCOPE_MODEL_DIR,
+            "mlflow_tracking_uri": self.MLFLOW_TRACKING_URI,
         }
         summary["openai_api_key"] = (
             "***redacted***"
