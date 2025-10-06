@@ -2,12 +2,40 @@
 Re-ranking system for retrieved documents
 """
 from typing import Dict, List, Any, Optional, Tuple
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
+import logging
 import math
+import os
 import re
 
 from .retriever import RetrievalResult
+
+logger = logging.getLogger(__name__)
+
+try:  # pragma: no cover - optional dependency
+    from FlagEmbedding import FlagReranker  # type: ignore
+except Exception as exc:  # pragma: no cover - dependency missing
+    FlagReranker = None  # type: ignore
+    _BGE_INIT_ERROR = exc
+    _BGE_RERANKER = None
+else:
+    _BGE_INIT_ERROR = None
+    _BGE_MODEL_NAME = os.getenv("RERANKER_MODEL", "BAAI/bge-reranker-large")
+    try:
+        _BGE_RERANKER = FlagReranker(_BGE_MODEL_NAME, use_fp16=True)
+    except Exception as exc:  # pragma: no cover - init failure
+        logger.warning("FlagReranker initialisation failed: %s", exc)
+        _BGE_RERANKER = None
+
+try:
+    _RERANK_TIMEOUT_SEC = float(os.getenv("RERANKER_TIMEOUT_MS", "500")) / 1000.0
+except ValueError:
+    _RERANK_TIMEOUT_SEC = 0.5
+_RERANK_EXECUTOR: Optional[ThreadPoolExecutor] = None
+if _BGE_RERANKER is not None:
+    _RERANK_EXECUTOR = ThreadPoolExecutor(max_workers=1)
 
 class RerankingMethod(Enum):
     """Re-ranking methods"""
@@ -407,9 +435,9 @@ class HybridReranker:
         """Get re-ranking statistics"""
         if not reranked_results:
             return {}
-        
+
         rank_changes = [abs(r.rank_change) for r in reranked_results]
-        
+
         return {
             "total_results": len(reranked_results),
             "average_rank_change": sum(rank_changes) / len(rank_changes),
@@ -418,3 +446,42 @@ class HybridReranker:
             "average_rerank_score": sum(r.rerank_score for r in reranked_results) / len(reranked_results),
             "score_improvement": sum(1 for r in reranked_results if r.final_score > r.original_result.score)
         }
+
+
+def rerank(query: str, documents: List[RetrievalResult]) -> List[RetrievalResult]:
+    """Lightweight wrapper around the optional BGE reranker."""
+
+    if not documents or _BGE_RERANKER is None:
+        if _BGE_INIT_ERROR:
+            logger.debug("BGE reranker unavailable: %s", _BGE_INIT_ERROR)
+        return documents
+
+    pairs = [(query, doc.content) for doc in documents]
+    executor = _RERANK_EXECUTOR
+    if executor is None:
+        try:
+            scores = _BGE_RERANKER.compute_score(pairs)
+        except Exception as exc:  # pragma: no cover - external failure
+            logger.warning("BGE reranker scoring failed: %s", exc)
+            return documents
+    else:
+        future = executor.submit(_BGE_RERANKER.compute_score, pairs)
+        try:
+            scores = future.result(timeout=_RERANK_TIMEOUT_SEC)
+        except FuturesTimeoutError:
+            logger.warning(
+                "BGE reranker timed out after %.0f ms; returning dense/sparse order",
+                _RERANK_TIMEOUT_SEC * 1000.0,
+            )
+            return documents
+        except Exception as exc:  # pragma: no cover - external failure
+            logger.warning("BGE reranker scoring failed: %s", exc)
+            return documents
+
+    updated: List[RetrievalResult] = []
+    for doc, score in zip(documents, scores):
+        updated_doc = replace(doc, score=float(score))
+        updated.append(updated_doc)
+
+    updated.sort(key=lambda x: x.score, reverse=True)
+    return updated

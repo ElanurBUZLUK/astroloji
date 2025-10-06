@@ -1,8 +1,8 @@
 """Interpretation payloads exchanged with clients."""
 from __future__ import annotations
 
-from typing import List, Optional
-from pydantic import BaseModel, Field
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, Field, model_validator
 
 
 class AnswerSection(BaseModel):
@@ -33,13 +33,21 @@ class AnswerBody(BaseModel):
 
 
 class CitationEntry(BaseModel):
-    """Represents a single citation used in the answer."""
+    """Required citation metadata for each evidence item in responses."""
 
-    n: int
-    doc_id: str
-    span: str
-    title: Optional[str] = None
-    source: Optional[str] = None
+    doc_id: str = Field(..., min_length=1)
+    section: int = Field(..., ge=0)
+    line_start: int = Field(..., ge=0)
+    line_end: int = Field(..., ge=0)
+    paragraph: Optional[int] = Field(default=None, ge=0)
+    tradition: Optional[str] = Field(
+        default=None, description="e.g., Hellenistic, Medieval, Modern"
+    )
+    language: Optional[str] = Field(default=None, description="TR/EN etc.")
+    source_url: Optional[str] = None
+    snippet: Optional[str] = Field(
+        default=None, description="Short preview of the cited text."
+    )
 
 
 class AnswerMetadata(BaseModel):
@@ -61,4 +69,13 @@ class AnswerPayload(BaseModel):
     citations: List[CitationEntry] = Field(default_factory=list)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     limits: AnswerMetadata = Field(default_factory=AnswerMetadata)
-    evidence_summary: Optional[dict] = None
+    evidence_summary: Optional[Dict[str, Any]] = None
+
+    @model_validator(mode="after")
+    def _validate_citations_non_empty(cls, payload: "AnswerPayload") -> "AnswerPayload":
+        if not payload.citations:
+            raise ValueError("citations must include at least one entry with doc_id/section/line range")
+        return payload
+
+    class Config:
+        validate_assignment = True

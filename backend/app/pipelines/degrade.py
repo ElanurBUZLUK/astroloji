@@ -5,7 +5,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
-from app.config import settings
+from backend.app.config import settings
 from app.evaluation.observability import observability
 
 
@@ -34,6 +34,7 @@ class DegradePolicyManager:
         min_latency_samples: Optional[int] = None,
         rag_low_top_k: Optional[int] = None,
     ) -> None:
+        """Parameterize the degrade guardrails and wire in the metrics backend."""
         self._metrics = metrics or observability.metrics
         self._enabled = settings.RAG_DEGRADE_ENABLED if enabled is None else enabled
         self._latency_threshold_ms = (

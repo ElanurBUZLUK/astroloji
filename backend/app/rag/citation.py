@@ -379,3 +379,33 @@ class CitationManager:
             formatted_list += "\n"
         
         return formatted_list
+
+
+def ensure_paragraph_coverage(answer_text: str, citations: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Ensure each non-empty paragraph has at least one citation reference."""
+
+    paragraphs = [segment for segment in (answer_text or "").split("\n\n") if segment.strip()]
+    if not paragraphs or not citations:
+        return citations
+
+    normalized: List[Dict[str, Any]] = []
+    assigned = set()
+    for entry in citations:
+        data = dict(entry)
+        paragraph = data.get("paragraph")
+        if isinstance(paragraph, int) and 0 <= paragraph < len(paragraphs):
+            assigned.add(paragraph)
+        else:
+            data["paragraph"] = None
+        normalized.append(data)
+
+    fallback_idx = 0
+    for paragraph_idx in range(len(paragraphs)):
+        if paragraph_idx in assigned:
+            continue
+        target = normalized[fallback_idx % len(normalized)]
+        target["paragraph"] = paragraph_idx
+        assigned.add(paragraph_idx)
+        fallback_idx += 1
+
+    return normalized

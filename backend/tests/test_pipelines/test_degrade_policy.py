@@ -1,7 +1,7 @@
 """Tests for adaptive degrade policy manager."""
 from app.evaluation.observability import MetricCollector
 from app.pipelines.degrade import DegradePolicyManager
-from app.config import settings
+from backend.app.config import settings
 
 
 def test_degrade_inactive_without_samples():

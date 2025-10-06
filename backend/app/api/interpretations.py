@@ -1,19 +1,43 @@
-"""
-Interpretation request and result endpoints
-"""
-from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, Field
-from typing import Dict, Any, Optional, List
-from datetime import datetime
+"""Interpretation request and result endpoints."""
 import uuid
+from datetime import datetime
+from types import SimpleNamespace
+from typing import Any, Dict, List, Optional
+
+from fastapi import APIRouter, HTTPException, status
+from loguru import logger
+from pydantic import BaseModel, Field
 
 from app.interpreters.core import InterpretationEngine
 from app.interpreters.output_composer import OutputMode, OutputStyle
 from app.rag.core import RAGSystem, RAGQuery
-from app.rag.citation import CitationStyle
+from app.rag.citation import CitationStyle, ensure_paragraph_coverage
 from app.services import ChartService, InterpretationService
 
 router = APIRouter()
+
+
+def _ensure_citations(payload: Dict[str, Any]) -> Dict[str, Any]:
+    citations = payload.get("citations") or []
+    if not citations:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Citations required: model must return evidence with doc_id/section/line range",
+        )
+    missing_fields = []
+    for idx, cite in enumerate(citations):
+        for required in ("doc_id", "section", "line_start", "line_end"):
+            value = cite.get(required)
+            if value in (None, ""):
+                missing_fields.append((idx, required))
+    if missing_fields:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Citations missing doc_id/section/line metadata",
+        )
+    summary_text = payload.get("summary") or ""
+    payload["citations"] = ensure_paragraph_coverage(summary_text, citations)
+    return payload
 
 class InterpretationRequest(BaseModel):
     """Interpretation request model"""
@@ -127,7 +151,54 @@ async def create_interpretation_request(request_data: InterpretationRequest):
         )
 
         if not saved:
-            print("Warning: Failed to save interpretation to database")
+            logger.warning(
+                "Failed to persist interpretation",
+                extra={"interpretation_id": interpretation_id},
+            )
+
+        doc_meta_map: Dict[str, Dict[str, Any]] = {}
+        for doc in rag_response.documents or []:
+            metadata = doc.get("metadata") or {}
+            doc_id = metadata.get("doc_id") or doc.get("source_id")
+            if doc_id:
+                doc_meta_map[doc_id] = metadata
+
+        raw_citations = list(rag_response.citations or [])
+        if not raw_citations and rag_response.documents:
+            for doc in rag_response.documents[:1]:
+                metadata = doc.get("metadata") or {}
+                doc_id = metadata.get("doc_id") or doc.get("source_id")
+                raw_citations.append(
+                    SimpleNamespace(
+                        source_id=doc_id,
+                        content_snippet=(doc.get("content") or "")[:200],
+                        source_type=metadata.get("tradition"),
+                        url=metadata.get("source_url"),
+                    )
+                )
+
+        def _safe_int(value: Any, default: int) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        response_citations: List[Dict[str, Any]] = []
+        for index, cite in enumerate(raw_citations):
+            source_id = getattr(cite, "source_id", None)
+            metadata = doc_meta_map.get(source_id, {})
+            response_citations.append(
+                {
+                    "doc_id": source_id or f"doc-{index+1}",
+                    "section": _safe_int(metadata.get("section"), index),
+                    "line_start": _safe_int(metadata.get("line_start"), 0),
+                    "line_end": _safe_int(metadata.get("line_end"), 0),
+                    "tradition": metadata.get("tradition") or getattr(cite, "source_type", None),
+                    "language": metadata.get("language"),
+                    "source_url": getattr(cite, "url", None) or metadata.get("source_url"),
+                    "snippet": getattr(cite, "content_snippet", None),
+                }
+            )
 
         # Format response
         response = {
@@ -165,8 +236,9 @@ async def create_interpretation_request(request_data: InterpretationRequest):
             "stored_in_db": saved,
             "created_at": datetime.now()
         }
-        
-        return response
+        response["citations"] = response_citations
+
+        return _ensure_citations(response)
         
     except Exception as e:
         raise HTTPException(

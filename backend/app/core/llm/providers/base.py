@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional
 
 @dataclass
 class LLMResponse:
+    """Normalized response wrapper shared by all provider implementations."""
     content: str
     tokens_used: int
     raw: Dict[str, Any]

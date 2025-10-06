@@ -4,10 +4,10 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Any, Dict, Optional
 
-import pytz
+from zoneinfo import ZoneInfo
 
 from app.calculators import (
     EphemerisService,
@@ -23,7 +23,7 @@ from app.calculators import (
     MidpointsCalculator,
     FixedStarsCalculator,
 )
-from app.config import settings
+from backend.app.config import settings
 from app.schemas import BirthData, ChartContext, NatalCore, TimingBundle
 
 
@@ -39,6 +39,7 @@ class ChartBootstrapper:
     """High level orchestrator that caches and returns chart calculations."""
 
     def __init__(self, cache_ttl: int | None = None) -> None:
+        """Initialize the bootstrapper with an in-memory TTL cache."""
         self._ttl = cache_ttl or settings.CACHE_TTL_SECONDS
         self._cache: Dict[str, tuple[float, ChartBuildResult]] = {}
 
@@ -59,6 +60,7 @@ class ChartBootstrapper:
         return chart_result
 
     def _compute_chart(self, birth_data: BirthData) -> ChartBuildResult:
+        """Run all calculators to produce chart data and rendered context objects."""
         birth_dt = self._to_datetime(birth_data)
         ephemeris = EphemerisService()
 
@@ -171,6 +173,7 @@ class ChartBootstrapper:
                 "fixed_stars": fixed_stars_result,
                 "lots": lots,
                 "is_day_birth": is_day,
+                "ephemeris_status": ephemeris.status,
             }
 
             context = ChartContext(
@@ -213,6 +216,7 @@ class ChartBootstrapper:
             ephemeris.close()
 
     def _fingerprint(self, birth_data: BirthData) -> str:
+        """Build a deterministic cache key from birth data fields."""
         payload = {
             "date": birth_data.date,
             "time": birth_data.time or "12:00",
@@ -223,6 +227,7 @@ class ChartBootstrapper:
         return json.dumps(payload, sort_keys=True)
 
     def _to_datetime(self, birth_data: BirthData) -> datetime:
+        """Convert birth inputs into a timezone-aware datetime."""
         birth_date = date.fromisoformat(birth_data.date)
         if birth_data.time:
             hour, minute = (int(part) for part in birth_data.time.split(":")[:2])
@@ -236,12 +241,13 @@ class ChartBootstrapper:
             minute,
         )
         try:
-            tzinfo = pytz.timezone(birth_data.tz)
-        except Exception:
-            tzinfo = pytz.UTC
-        return tzinfo.localize(naive_dt)
+            tzinfo = ZoneInfo(birth_data.tz)
+        except Exception:  # pragma: no cover - depends on tzdata availability
+            tzinfo = timezone.utc
+        return naive_dt.replace(tzinfo=tzinfo)
 
     def _prepare_almuten_points(self, planets: Dict[str, Any], houses: Any, lots: Dict[str, float]) -> list[Point]:
+        """Gather the key points needed to compute the almuten figuris."""
         return [
             Point(
                 "Sun",
@@ -272,6 +278,7 @@ class ChartBootstrapper:
         ]
 
     def _longitude_to_sign(self, longitude: float) -> str:
+        """Translate an ecliptic longitude into its zodiac sign name."""
         signs = [
             "Aries",
             "Taurus",
@@ -289,6 +296,7 @@ class ChartBootstrapper:
         return signs[int(longitude % 360 // 30)]
 
     def _current_zr_periods(self, timeline: Any, current_date: date) -> Dict[str, Any]:
+        """Select the active L1 and L2 zodiacal releasing periods."""
         current_l1 = None
         current_l2 = None
         for period in timeline.l1_periods:
@@ -320,6 +328,7 @@ class ChartBootstrapper:
         return {"l1": current_l1, "l2": current_l2}
 
     def _next_zr_peaks(self, timeline: Any, current_date: date) -> list[Dict[str, Any]]:
+        """Return the next few major ZR peaks after the current date."""
         next_peaks: list[Dict[str, Any]] = []
         for period in timeline.l1_periods:
             if period.is_peak and period.start_date > current_date:

@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 
 @dataclass
 class PromptContext:
+    """Container describing the conversational style, language, and evidence state."""
     language: str
     style: str
     mode: str
@@ -18,6 +19,7 @@ class PromptEngineer:
     """Builds prompts according to style and coverage signals."""
 
     def build_messages(self, summary: str, context: PromptContext) -> List[Dict[str, str]]:
+        """Compose system and user messages tailored to the provided context."""
         system_prompt = self._system_prompt(context)
         user_prompt = self._user_prompt(summary, context)
         return [
@@ -26,6 +28,7 @@ class PromptEngineer:
         ]
 
     def _system_prompt(self, context: PromptContext) -> str:
+        """Build a system message that encodes tone, language, and safety guidance."""
         base = {
             "en": "You are an expert astrologer who writes grounded, cited analysis.",
             "tr": "Temellere dayanan, kaynak gösteren uzman bir astrologsun.",
@@ -42,6 +45,7 @@ class PromptEngineer:
         return " " .join(parts)
 
     def _user_prompt(self, summary: str, context: PromptContext) -> str:
+        """Assemble the user-facing prompt with guardrails and coverage telemetry."""
         components = [
             f"Mode: {context.mode}",
             f"Style: {context.style}",

@@ -1,88 +1,96 @@
-"""
-FastAPI main application factory
-"""
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
+"""FastAPI application entry-point."""
+from __future__ import annotations
+
 from contextlib import asynccontextmanager
 
-from app.api import auth, charts, interpretations, alerts, admin
-from app.api.v1 import api_router as api_v1_router
-from app.config import settings
-from app.middleware.observability import ObservabilityMiddleware, PerformanceMiddleware
-from app.evaluation.observability import observability
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from loguru import logger
+
+from backend.app.api import admin, alerts, auth, charts, interpretations
+from backend.app.api.v1 import api_router as api_v1_router
+from backend.app.config import settings
+from backend.app.evaluation.observability import observability
+from backend.app.logging_setup import setup_logging
+from backend.app.middleware.observability import ObservabilityMiddleware, PerformanceMiddleware
+from backend.app.middleware.privacy import PIIMaskingMiddleware
+
+
+setup_logging(settings)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan events"""
-    # Startup
-    print("🚀 Starting Astro-AA API...")
-    print("📊 Observability system initialized")
-    
-    # Update initial system health
+    """Lifecycle hooks for application start and shutdown."""
+
+    logger.info("Starting service startup")
     observability.update_system_health()
-    
+
     yield
-    
-    # Shutdown
-    print("🛑 Shutting down Astro-AA API...")
+
+    logger.info("Service shutdown complete")
+
 
 def create_app() -> FastAPI:
-    """Create FastAPI application with middleware and routers"""
-    
+    """Instantiate the FastAPI application and register middleware/routers."""
+
     app = FastAPI(
-        title="Astro-AA API",
-        description="AI Astrolog - Almuten-centric astrology interpretation engine",
+        title=settings.app_name,
         version="0.1.0",
-        docs_url="/docs" if settings.DEBUG else None,
-        redoc_url="/redoc" if settings.DEBUG else None,
+        docs_url="/docs" if settings.debug else None,
+        redoc_url="/redoc" if settings.debug else None,
         lifespan=lifespan,
     )
-    
-    # Add observability middleware
+
+    # Middleware
+    app.add_middleware(PIIMaskingMiddleware)
     app.add_middleware(ObservabilityMiddleware)
     app.add_middleware(PerformanceMiddleware, slow_request_threshold=2.0)
-    
-    # CORS middleware
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.ALLOWED_ORIGINS,
+        allow_origins=settings.cors_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
-    
-    # Include routers
+
+    # Routers
     app.include_router(api_v1_router)
     app.include_router(auth.router, prefix="/auth", tags=["auth"])
     app.include_router(charts.router, prefix="/charts", tags=["charts"])
     app.include_router(interpretations.router, prefix="/interpretations", tags=["interpretations"])
     app.include_router(alerts.router, prefix="/alerts", tags=["alerts"])
     app.include_router(admin.router, prefix="/admin", tags=["admin"])
-    
+
     @app.get("/")
-    async def root():
+    async def root() -> dict[str, str | list[str]]:
         return {
-            "message": "Astro-AA API", 
+            "message": settings.app_name,
             "version": "0.1.0",
             "status": "operational",
             "features": [
-                "Almuten-centric calculations",
-                "Zodiacal Releasing",
+                "Natal chart computations",
                 "RAG-augmented interpretations",
-                "Real-time observability"
-            ]
+                "Observability hooks",
+            ],
         }
-    
+
     @app.get("/health")
-    async def health_check():
+    async def health_check() -> dict[str, str | float | None]:
         health_data = observability.update_system_health()
         return {
             "status": "healthy",
-            "health_score": health_data["health_score"],
-            "active_alerts": health_data["active_alerts"],
-            "timestamp": health_data.get("timestamp")
+            "health_score": health_data.get("health_score"),
+            "active_alerts": health_data.get("active_alerts"),
+            "timestamp": health_data.get("timestamp"),
         }
-    
+
+    logger.info("Application initialised", settings=settings.describe())
+
     return app
 
+
 app = create_app()
+
+
+__all__ = ["app", "create_app"]

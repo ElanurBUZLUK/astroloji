@@ -1,12 +1,13 @@
 """
 Observability middleware for automatic metrics collection
 """
-from fastapi import Request, Response
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.types import ASGIApp
-from datetime import datetime
 import time
 import uuid
+
+from fastapi import Request
+from loguru import logger
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
 
 from ..evaluation.observability import observability
 
@@ -89,6 +90,13 @@ class PerformanceMiddleware(BaseHTTPMiddleware):
         
         # Log slow requests
         if response_time > self.slow_request_threshold:
-            print(f"SLOW REQUEST: {request.method} {request.url.path} took {response_time:.3f}s")
-        
+            logger.warning(
+                "Slow request detected",
+                extra={
+                    "method": request.method,
+                    "path": request.url.path,
+                    "duration_seconds": round(response_time, 3),
+                },
+            )
+
         return response

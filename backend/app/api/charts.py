@@ -1,11 +1,10 @@
-"""
-Chart creation and management endpoints
-"""
-from fastapi import APIRouter, HTTPException, status
-from pydantic import BaseModel, Field
-from typing import Dict, Any, Optional
-from datetime import datetime, date
+"""Chart creation and management endpoints"""
 import uuid
+from datetime import datetime
+from typing import Any, Dict
+
+from fastapi import APIRouter, HTTPException, status
+from loguru import logger
 
 from app.calculators.ephemeris import EphemerisService
 from app.calculators.almuten import almuten_figuris, Point
@@ -18,52 +17,29 @@ from app.calculators.solar_arc import SolarArcCalculator
 from app.calculators.transits import TransitsCalculator
 from app.calculators.midpoints import MidpointsCalculator
 from app.calculators.fixed_stars import FixedStarsCalculator
+from app.schemas.birth import BirthInput
+from app.schemas.chart import BirthData as ChartBirthData
 from app.services import ChartService
 
 router = APIRouter()
 
-class BirthData(BaseModel):
-    """Birth data input model"""
-    birth_date: date = Field(..., description="Birth date")
-    birth_time: Optional[str] = Field(None, description="Birth time (HH:MM format)")
-    latitude: float = Field(..., ge=-90, le=90, description="Birth latitude")
-    longitude: float = Field(..., ge=-180, le=180, description="Birth longitude")
-    timezone: str = Field("UTC", description="Timezone identifier")
-    place_name: Optional[str] = Field(None, description="Birth place name")
-
-class ChartResponse(BaseModel):
-    """Chart response model"""
-    chart_id: str
-    birth_data: BirthData
-    planets: Dict[str, Any]
-    houses: Dict[str, Any]
-    almuten: Dict[str, Any]
-    zodiacal_releasing: Dict[str, Any]
-    lots: Dict[str, float]
-    is_day_birth: bool
-    created_at: datetime
-
 @router.post("/", response_model=Dict[str, Any])
-async def create_chart(birth_data: BirthData):
+async def create_chart(birth: BirthInput):
     """Create a new astrological chart with full calculations"""
     try:
         # Generate unique chart ID
         chart_id = str(uuid.uuid4())
-        
-        # Combine date and time
-        if birth_data.birth_time:
-            time_parts = birth_data.birth_time.split(":")
-            birth_datetime = datetime.combine(
-                birth_data.birth_date,
-                datetime.min.time().replace(
-                    hour=int(time_parts[0]),
-                    minute=int(time_parts[1]) if len(time_parts) > 1 else 0
-                )
-            )
-        else:
-            # Default to noon if no time provided
-            birth_datetime = datetime.combine(birth_data.birth_date, datetime.min.time().replace(hour=12))
-        
+        try:
+            birth_dt_utc = birth.dt_utc
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(exc),
+            ) from exc
+
+        chart_birth: ChartBirthData = birth.to_birth_data()
+        birth_date_value = datetime.fromisoformat(chart_birth.date).date()
+
         # Initialize services
         ephemeris = EphemerisService()
         zr_calc = ZRCalculator()
@@ -78,13 +54,14 @@ async def create_chart(birth_data: BirthData):
         
         try:
             # Calculate Julian Day
-            jd = ephemeris.julian_day(birth_datetime)
+            jd = ephemeris.julian_day(birth_dt_utc)
             
             # Get planet positions
             planets = ephemeris.get_all_planets(jd)
             
             # Calculate houses
-            houses = ephemeris.get_houses(jd, birth_data.latitude, birth_data.longitude)
+            house_system = "whole_sign" if birth.house == "W" else "placidus"
+            houses = ephemeris.get_houses(jd, birth.lat, birth.lon, house_system)
             
             # Determine day/night birth
             is_day = ephemeris.is_day_birth(planets, houses)
@@ -112,18 +89,18 @@ async def create_chart(birth_data: BirthData):
                 planets['Moon'].longitude,
                 houses.asc,
                 is_day,
-                birth_data.birth_date
+                birth_date_value
             )
             
             # Calculate Profection
             profection_result = profection_calc.calculate_profection(
-                birth_data.birth_date,
+                birth_date_value,
                 houses.asc
             )
             
             # Calculate Firdaria
             firdaria_result = firdaria_calc.get_current_firdaria(
-                birth_data.birth_date,
+                birth_date_value,
                 is_day
             )
             
@@ -132,10 +109,10 @@ async def create_chart(birth_data: BirthData):
             antiscia_result = antiscia_calc.get_antiscia_summary(planet_longitudes)
 
             # Calculate Progressions (Secondary)
-            progressions_result = progressions_calc.get_current_progressions(planet_longitudes, birth_data.birth_date)
+            progressions_result = progressions_calc.get_current_progressions(planet_longitudes, birth_date_value)
 
             # Calculate Solar Arc Directions
-            solar_arc_result = solar_arc_calc.get_current_solar_arc_directions(planet_longitudes, birth_data.birth_date)
+            solar_arc_result = solar_arc_calc.get_current_solar_arc_directions(planet_longitudes, birth_date_value)
 
             # Calculate Transits (current)
             # Note: For transits we need current positions, using simplified calculation
@@ -160,7 +137,7 @@ async def create_chart(birth_data: BirthData):
                     for name, pos in planets.items()
                 },
                 "houses": {
-                    "system": "placidus",
+                    "system": house_system,
                     "cusps": houses.cusps,
                     "asc": houses.asc,
                     "mc": houses.mc,
@@ -197,27 +174,37 @@ async def create_chart(birth_data: BirthData):
                     "midpoints": midpoints_result,
                     "fixed_stars": fixed_stars_result,
                     "lots": lots,
-                    "is_day_birth": is_day
+                    "is_day_birth": is_day,
+                    "ephemeris_status": ephemeris.status,
                 }
 
             # Save to database
             saved = ChartService.save_chart(
                 chart_id=chart_id,
-                birth_data=birth_data.dict(),
+                birth_data={
+                    "birth_date": chart_birth.date,
+                    "birth_time": chart_birth.time,
+                    "latitude": chart_birth.lat,
+                    "longitude": chart_birth.lng,
+                    "timezone": chart_birth.tz,
+                    "house": birth.house,
+                    "orb": birth.orb,
+                },
                 calculations=calculations_data
             )
 
             if not saved:
-                print("Warning: Failed to save chart to database")
+                logger.warning("Failed to persist chart to database", extra={"chart_id": chart_id})
 
             # Format response
             response = {
                 "chart_id": chart_id,
                 "status": "completed",
-                "birth_data": birth_data.dict(),
+                "birth_data": birth.model_dump(),
                 "calculations": calculations_data,
                 "created_at": datetime.now(),
-                "stored_in_db": saved
+                "stored_in_db": saved,
+                "ephemeris_status": ephemeris.status,
             }
 
             return response

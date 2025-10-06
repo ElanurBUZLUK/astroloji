@@ -1,18 +1,19 @@
-"""
-Database services for charts and interpretations
-"""
-from typing import Optional, Dict, Any
+"""Database services for charts and interpretations."""
+import json
 from datetime import datetime
+from typing import Any, Dict, Optional
+
+from loguru import logger
 from sqlalchemy.orm import Session
+
+from .database import get_db_session
 from .models import (
     Chart,
-    Interpretation,
-    ZRPeriod,
-    ProfectionPeriod,
     FirdariaPeriod,
+    Interpretation,
+    ProfectionPeriod,
+    ZRPeriod,
 )
-from .database import get_db_session
-import json
 
 class ChartService:
     """Service for chart database operations"""
@@ -75,15 +76,16 @@ class ChartService:
             session.commit()
             return True
 
-        except Exception as e:
+        except Exception:
             session.rollback()
-            print(f"Error saving chart: {e}")
+            logger.exception("Error saving chart")
             return False
         finally:
             session.close()
 
     @staticmethod
     def _upsert_zr_periods(session: Session, chart_id: str, zr_data: Dict[str, Any]) -> None:
+        """Replace existing ZR periods with newly computed ones."""
         session.query(ZRPeriod).filter(ZRPeriod.chart_id == chart_id).delete()
         if not zr_data:
             return
@@ -108,6 +110,7 @@ class ChartService:
 
     @staticmethod
     def _upsert_profection_period(session: Session, chart_id: str, profection: Optional[Dict[str, Any]]) -> None:
+        """Maintain the single profection record associated with a chart."""
         session.query(ProfectionPeriod).filter(ProfectionPeriod.chart_id == chart_id).delete()
         if not profection:
             return
@@ -124,6 +127,7 @@ class ChartService:
 
     @staticmethod
     def _upsert_firdaria_periods(session: Session, chart_id: str, firdaria: Optional[Dict[str, Any]]) -> None:
+        """Refresh the stored firdaria periods for the given chart."""
         session.query(FirdariaPeriod).filter(FirdariaPeriod.chart_id == chart_id).delete()
         if not firdaria:
             return
@@ -143,6 +147,7 @@ class ChartService:
 
     @staticmethod
     def _parse_date(value: Optional[str]):
+        """Convert an ISO timestamp string to a datetime if possible."""
         if not value:
             return None
         try:
@@ -223,8 +228,8 @@ class ChartService:
                 },
             }
 
-        except Exception as e:
-            print(f"Error retrieving chart: {e}")
+        except Exception:
+            logger.exception("Error retrieving chart")
             return None
         finally:
             session.close()
@@ -253,9 +258,9 @@ class InterpretationService:
             session.commit()
             return True
 
-        except Exception as e:
+        except Exception:
             session.rollback()
-            print(f"Error saving interpretation: {e}")
+            logger.exception("Error saving interpretation")
             return False
         finally:
             session.close()
@@ -280,8 +285,8 @@ class InterpretationService:
                 "created_at": interp.created_at.isoformat() if interp.created_at else None
             }
 
-        except Exception as e:
-            print(f"Error retrieving interpretation: {e}")
+        except Exception:
+            logger.exception("Error retrieving interpretation")
             return None
         finally:
             session.close()
@@ -300,8 +305,8 @@ class InterpretationService:
                 "created_at": interp.created_at.isoformat() if interp.created_at else None
             } for interp in interpretations]
 
-        except Exception as e:
-            print(f"Error retrieving chart interpretations: {e}")
+        except Exception:
+            logger.exception("Error retrieving chart interpretations")
             return []
         finally:
             session.close()
@@ -333,9 +338,9 @@ class AlertService:
             session.commit()
             return alert_id
 
-        except Exception as e:
+        except Exception:
             session.rollback()
-            print(f"Error creating alert: {e}")
+            logger.exception("Error creating alert")
             return None
         finally:
             session.close()
@@ -368,8 +373,8 @@ class AlertService:
                 "resolved_at": alert.resolved_at.isoformat() if alert.resolved_at else None
             } for alert in alerts]
 
-        except Exception as e:
-            print(f"Error retrieving alerts: {e}")
+        except Exception:
+            logger.exception("Error retrieving alerts")
             return []
         finally:
             session.close()
@@ -388,9 +393,9 @@ class AlertService:
                 return True
             return False
 
-        except Exception as e:
+        except Exception:
             session.rollback()
-            print(f"Error marking alert as read: {e}")
+            logger.exception("Error marking alert as read")
             return False
         finally:
             session.close()
@@ -411,9 +416,9 @@ class AlertService:
                 return True
             return False
 
-        except Exception as e:
+        except Exception:
             session.rollback()
-            print(f"Error resolving alert: {e}")
+            logger.exception("Error resolving alert")
             return False
         finally:
             session.close()

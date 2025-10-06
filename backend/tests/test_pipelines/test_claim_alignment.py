@@ -22,21 +22,40 @@ def _build_payload(include_citations: bool = True) -> AnswerPayload:
     if include_citations:
         citations = [
             CitationEntry(
-                n=1,
-                doc_id="cite_doc123_abcd",
-                span="(0,0)",
-                title="Modern Source",
-                source="modern",
+                doc_id="doc123",
+                section=0,
+                line_start=0,
+                line_end=0,
+                tradition="modern",
+                language="EN",
+                source_url=None,
+                snippet="Leadership prominence remains a core theme.",
             ),
             CitationEntry(
-                n=2,
-                doc_id="cite_doc456_efgh",
-                span="(0,0)",
-                title="Traditional Source",
-                source="traditional",
+                doc_id="doc456",
+                section=0,
+                line_start=0,
+                line_end=0,
+                tradition="traditional",
+                language="EN",
+                source_url=None,
+                snippet="Impulsive decisions under pressure may surface.",
             ),
         ]
-    return AnswerPayload(answer=answer, citations=citations, confidence=0.8, limits=AnswerMetadata())
+        return AnswerPayload(
+            answer=answer,
+            citations=citations,
+            confidence=0.8,
+            limits=AnswerMetadata(),
+        )
+
+    return AnswerPayload.model_construct(
+        answer=answer,
+        citations=[],
+        confidence=0.8,
+        limits=AnswerMetadata(),
+        evidence_summary=None,
+    )
 
 
 def _documents() -> list[dict]:

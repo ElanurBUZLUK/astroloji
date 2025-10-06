@@ -6,7 +6,7 @@ import json
 from typing import Any, Dict, List
 
 from app.pipelines.cache import RedisSemanticCache
-from app.config import settings
+from backend.app.config import settings
 
 
 class SemanticCacheAligner:

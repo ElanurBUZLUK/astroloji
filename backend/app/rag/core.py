@@ -1,38 +1,23 @@
 """
 Core RAG system that orchestrates retrieval, re-ranking, and citation
 """
-from typing import Dict, List, Any, Optional
 from dataclasses import dataclass, field
 from datetime import datetime
-from urllib.parse import urlparse
+from typing import Any, Dict, List, Optional
 
 from .retriever import (
     HybridRetriever,
     MockVectorStore,
     MockSparseStore,
-    QdrantVectorStore,
-    OpenSearchSparseStore,
     RetrievalQuery,
     RetrievalMethod,
+    build_retriever_profile,
 )
 from .query_expansion import QueryExpander, ExpansionMethod
 from .re_ranker import HybridReranker, RerankingMethod
 from .citation import CitationManager, CitationStyle
-from app.config import settings
-from app.rag.embeddings import EMBEDDING_DIM
-
-try:  # pragma: no cover - optional dependency import
-    from qdrant_client import QdrantClient
-    from qdrant_client.http.models import VectorParams, Distance
-except Exception:  # pragma: no cover
-    QdrantClient = None
-    VectorParams = None
-    Distance = None
-
-try:  # pragma: no cover - optional dependency import
-    from opensearchpy import OpenSearch
-except Exception:  # pragma: no cover
-    OpenSearch = None
+from backend.app.config import settings
+from loguru import logger
 
 @dataclass
 class RAGQuery:
@@ -65,8 +50,9 @@ class RAGSystem:
     
     def __init__(self):
         # Initialize components (real services preferred, fall back to mocks)
-        self.vector_store = self._build_vector_store()
-        self.sparse_store = self._build_sparse_store()
+        profile = build_retriever_profile()
+        self.vector_store = profile.get("dense") or MockVectorStore()
+        self.sparse_store = profile.get("sparse") or MockSparseStore()
         self.retriever = HybridRetriever(self.vector_store, self.sparse_store)
         self.query_expander = QueryExpander()
         self.reranker = HybridReranker()
@@ -177,12 +163,15 @@ class RAGSystem:
                 documents=documents,
             )
             
-        except Exception as e:
-            # Return error response
+        except Exception as exc:
+            logger.exception(
+                "RAG query processing failed",
+                extra={"query": rag_query.query},
+            )
             processing_time = (datetime.now() - start_time).total_seconds()
             return RAGResponse(
                 query=rag_query.query,
-                retrieved_content=[f"Error processing query: {str(e)}"],
+                retrieved_content=[f"Error processing query: {str(exc)}"],
                 confidence_score=0.0,
                 processing_time=processing_time,
                 documents=[],
@@ -409,71 +398,16 @@ class RAGSystem:
                     sparse_success = sparse_result
             
             return vector_success and sparse_success
-        except Exception as e:
-            print(f"Error adding knowledge: {e}")
+        except Exception:
+            logger.exception("Error adding knowledge")
             return False
 
     def _fallback_to_mock(self, reason: str) -> None:
+        """Swap retrievers to mock implementations when real stores fail."""
         self.vector_store = MockVectorStore()
         self.sparse_store = MockSparseStore()
         self.retriever = HybridRetriever(self.vector_store, self.sparse_store)
-        print(f"⚠️ Retrieval fallback to mock stores due to: {reason}")
-
-    def _build_vector_store(self):
-        if QdrantClient and VectorParams and Distance:
-            try:
-                client = QdrantClient(url=settings.QDRANT_URL)
-                collection = getattr(settings, "VECTOR_COLLECTION", "astro_semantic_tr_en")
-                self._ensure_qdrant_collection(client, collection)
-                return QdrantVectorStore(client=client, collection_name=collection)
-            except Exception as exc:
-                print(f"⚠️ Qdrant unavailable, fallback to mock: {exc}")
-        return MockVectorStore()
-
-    def _build_sparse_store(self):
-        if OpenSearch:
-            try:
-                parsed = urlparse(settings.OPENSEARCH_URL)
-                host_config = {
-                    "host": parsed.hostname or "localhost",
-                    "port": parsed.port or 9200,
-                    "scheme": parsed.scheme or "http",
-                }
-                client = OpenSearch(hosts=[host_config])
-                index = getattr(settings, "BM25_INDEX", "astro_lexical")
-                self._ensure_opensearch_index(client, index)
-                return OpenSearchSparseStore(client=client, index_name=index)
-            except Exception as exc:
-                print(f"⚠️ OpenSearch unavailable, fallback to mock: {exc}")
-        return MockSparseStore()
-
-    def _ensure_qdrant_collection(self, client: QdrantClient, collection: str) -> None:
-        try:
-            collections = client.get_collections().collections
-            if any(col.name == collection for col in collections):
-                return
-            client.recreate_collection(
-                collection_name=collection,
-                vectors_config=VectorParams(size=EMBEDDING_DIM, distance=Distance.COSINE),
-            )
-        except Exception as exc:
-            print(f"⚠️ Could not ensure Qdrant collection '{collection}': {exc}")
-
-    def _ensure_opensearch_index(self, client: OpenSearch, index: str) -> None:
-        try:
-            exists = client.indices.exists(index=index)
-            if not exists:
-                client.indices.create(
-                    index=index,
-                    body={
-                        "settings": {"analysis": {"analyzer": {"default": {"type": "standard"}}}},
-                        "mappings": {
-                            "properties": {
-                                "content": {"type": "text"},
-                                "metadata": {"type": "object", "enabled": True},
-                            }
-                        },
-                    },
-                )
-        except Exception as exc:
-            print(f"⚠️ Could not ensure OpenSearch index '{index}': {exc}")
+        logger.warning(
+            "Retrieval fallback to mock stores",
+            extra={"reason": reason},
+        )

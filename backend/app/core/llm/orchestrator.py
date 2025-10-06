@@ -10,7 +10,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from pydantic import ValidationError
 
-from app.config import settings
+from backend.app.config import settings
 from app.evaluation.observability import observability
 from app.schemas import AnswerPayload, RAGAnswerRequest
 from app.schemas.rag import PipelineDebugInfo
@@ -21,6 +21,7 @@ from .providers.base import LLMResponse
 
 @dataclass
 class ModelProfile:
+    """Describes one model tier and its associated provider options."""
     key: str
     name: str
     providers: List[str]
@@ -36,6 +37,7 @@ class ModelProfile:
 
 @dataclass
 class RoutingDecision:
+    """Snapshot of the router's choice, including fallbacks and health data."""
     classification: str
     confidence_level: str
     confidence_score: float
@@ -49,6 +51,7 @@ class RoutingDecision:
 
 @dataclass
 class RoutingOutcome:
+    """Result bundle returned to callers after routing completes."""
     response: LLMResponse
     decision: RoutingDecision
     attempts: int
@@ -62,10 +65,12 @@ class IntentComplexityClassifier:
     """Simple heuristic classifier for routing decisions."""
 
     def __init__(self, policy_keywords: Optional[Sequence[str]] = None) -> None:
+        """Cache the keyword list used to detect policy-sensitive prompts."""
         raw_keywords = policy_keywords or settings.LLM_ROUTER_POLICY_KEYWORDS.split(",")
         self._policy_keywords = {kw.strip().lower() for kw in raw_keywords if kw.strip()}
 
     def classify(self, request: RAGAnswerRequest, coverage: Dict[str, Any]) -> str:
+        """Label the request complexity to steer routing heuristics."""
         query = request.query.lower()
         if any(keyword in query for keyword in self._policy_keywords):
             return "policy_risk"
@@ -85,6 +90,7 @@ class ConfidenceEstimator:
     """Combines retrieval signals into a confidence score."""
 
     def __init__(self, low_threshold: float, high_threshold: float) -> None:
+        """Store classification thresholds for low/medium/high confidence."""
         self._low = low_threshold
         self._high = high_threshold
 
@@ -94,6 +100,7 @@ class ConfidenceEstimator:
         rag_response: Any,
         evidence_pack: Dict[str, Any],
     ) -> Tuple[float, str]:
+        """Blend retrieval metrics into an overall confidence score and bucket."""
         coverage_score = coverage.get("score", 0.0)
         coverage_bonus = 0.15 if coverage.get("pass", False) else 0.0
 
@@ -128,20 +135,24 @@ class ProviderHealthMonitor:
     """Tracks rolling provider health scores based on latency and failures."""
 
     def __init__(self, window: int = 30) -> None:
+        """Keep rolling latency and failure history for each provider."""
         self._latencies: Dict[str, deque] = {}
         self._failures: Dict[str, int] = {}
         self._window = window
 
     def record_success(self, provider: str, latency_ms: float) -> None:
+        """Track a successful provider call and decay prior failures."""
         bucket = self._latencies.setdefault(provider, deque(maxlen=self._window))
         bucket.append(latency_ms)
         if provider in self._failures and self._failures[provider] > 0:
             self._failures[provider] = max(self._failures[provider] - 1, 0)
 
     def record_failure(self, provider: str) -> None:
+        """Increment failure counters for a provider."""
         self._failures[provider] = self._failures.get(provider, 0) + 1
 
     def health_score(self, provider: str) -> float:
+        """Return a penalty-adjusted health score for the provider."""
         latencies = self._latencies.get(provider, [])
         failure_count = self._failures.get(provider, 0)
         latency_penalty = 0.0
@@ -152,9 +163,11 @@ class ProviderHealthMonitor:
         return max(0.0, 1.0 - latency_penalty - failure_penalty)
 
     def snapshot(self, providers: Iterable[str]) -> Dict[str, float]:
+        """Produce a health snapshot dictionary for a provider list."""
         return {name: self.health_score(name) for name in providers}
 
     def best_provider(self, provider_candidates: Sequence[str]) -> Optional[str]:
+        """Select the healthiest provider among candidate names."""
         if not provider_candidates:
             return None
         scores = {name: self.health_score(name) for name in provider_candidates}
@@ -162,6 +175,7 @@ class ProviderHealthMonitor:
 
     @staticmethod
     def _percentile(values: List[float], percentile: float) -> float:
+        """Compute the given percentile using nearest-rank logic."""
         if not values:
             return 0.0
         ordered = sorted(values)
@@ -174,6 +188,7 @@ class ModelSelector:
     """Chooses the best model profile given routing signals."""
 
     def __init__(self, profiles: Dict[str, ModelProfile]) -> None:
+        """Store the ordered model tiers to consult during selection."""
         self._profiles = profiles
 
     def select(
@@ -183,6 +198,7 @@ class ModelSelector:
         degrade_state: DegradeDecision,
         health_snapshot: Dict[str, float],
     ) -> Tuple[ModelProfile, List[ModelProfile]]:
+        """Choose a primary model and ordered fallbacks given routing context."""
         order: List[str]
         if degrade_state.active:
             if confidence_level == "low":
@@ -217,9 +233,11 @@ class LoRAStyler:
     """Feature-flagged LoRA styler hook (stub)."""
 
     def __init__(self, enabled: bool) -> None:
+        """Remember whether the LoRA styling experiment is active."""
         self._enabled = enabled
 
     def apply(self, messages: List[Dict[str, Any]], classification: str) -> Tuple[List[Dict[str, Any]], bool]:
+        """Optionally prepend tone guidance when LoRA styling is enabled."""
         if not self._enabled:
             return messages, False
         styled = list(messages)
@@ -236,6 +254,7 @@ class SchemaValidator:
     """Validates repaired payloads against the API schema."""
 
     def validate(self, payload: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        """Validate a repaired payload against the API contract."""
         try:
             AnswerPayload.model_validate(payload)
             return True, None
@@ -251,6 +270,7 @@ class LLMOrchestrator:
         provider_pool: LLMProviderPool,
         auto_repair,
     ) -> None:
+        """Wire together routing dependencies and precalculate timeout tables."""
         self._pool = provider_pool
         self._auto_repair = auto_repair
         self._classifier = IntentComplexityClassifier()
@@ -270,6 +290,7 @@ class LLMOrchestrator:
         }
 
     def _build_profiles(self) -> Dict[str, ModelProfile]:
+        """Construct the routing profile table from settings."""
         fallback_provider = settings.LLM_ROUTER_LARGE_PROVIDER or settings.LLM_ROUTER_MEDIUM_PROVIDER
         fallback_model = settings.LLM_ROUTER_LARGE_MODEL or settings.LLM_ROUTER_MEDIUM_MODEL
 
@@ -317,6 +338,7 @@ class LLMOrchestrator:
         degrade_state: DegradeDecision,
         max_tokens: Optional[int],
     ) -> Optional[RoutingOutcome]:
+        """Route an answer revision request through the best available provider."""
         classification = self._classifier.classify(request, coverage)
         confidence_score, confidence_level = self._confidence.score(coverage, rag_response, evidence_pack)
         health_snapshot = self._health_monitor.snapshot(
@@ -408,6 +430,7 @@ class LLMOrchestrator:
         )
 
     def enrich_debug(self, debug: PipelineDebugInfo, outcome: Optional[RoutingOutcome]) -> None:
+        """Embed routing diagnostics into the pipeline debug payload."""
         if not outcome:
             return
         debug.routing = {

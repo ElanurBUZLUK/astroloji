@@ -12,12 +12,15 @@ OPENAI_API_BASE = os.getenv("OPENAI_API_BASE", "https://api.openai.com/v1")
 
 
 class OpenAIProvider(LLMProvider):
+    """Thin async wrapper around OpenAI's chat completions endpoint."""
     def __init__(self, api_key: str, model: str) -> None:
+        """Store credentials and create a reusable HTTP client."""
         self.api_key = api_key
         self.model = model
         self._client = httpx.AsyncClient(timeout=30.0)
 
     async def generate(self, prompt: str, **kwargs: Any) -> LLMResponse:
+        """Call the OpenAI chat completions API and normalize its response."""
         payload: Dict[str, Any] = {
             "model": kwargs.get("model", self.model),
             "temperature": kwargs.get("temperature", 0.7),
@@ -49,4 +52,5 @@ class OpenAIProvider(LLMProvider):
         return LLMResponse(content=content, tokens_used=tokens_used, raw=data, finish_reason=finish_reason)
 
     async def close(self) -> None:
+        """Close the underlying HTTPX client."""
         await self._client.aclose()

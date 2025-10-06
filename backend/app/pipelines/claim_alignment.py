@@ -82,8 +82,9 @@ def score_claim_alignment(
                     "text": claim["text"],
                     "origin": claim["origin"],
                     "score": 0.0,
-                    "citation_id": None,
-                    "citation_n": None,
+                    "citation_doc_id": None,
+                    "citation_section": None,
+                    "citation_lines": (None, None),
                     "doc_id": None,
                     "span": "",
                 }
@@ -103,8 +104,9 @@ def score_claim_alignment(
                     "text": claim["text"],
                     "origin": claim["origin"],
                     "score": 0.0,
-                    "citation_id": None,
-                    "citation_n": None,
+                    "citation_doc_id": None,
+                    "citation_section": None,
+                    "citation_lines": (None, None),
                     "doc_id": None,
                     "span": "",
                 }
@@ -140,8 +142,12 @@ def score_claim_alignment(
                 "text": claim["text"],
                 "origin": claim["origin"],
                 "score": round(best_score, 3),
-                "citation_id": getattr(best_citation, "doc_id", None),
-                "citation_n": getattr(best_citation, "n", None),
+                "citation_doc_id": getattr(best_citation, "doc_id", None),
+                "citation_section": getattr(best_citation, "section", None),
+                "citation_lines": (
+                    getattr(best_citation, "line_start", None),
+                    getattr(best_citation, "line_end", None),
+                ),
                 "doc_id": best_doc_id,
                 "span": best_span,
             }
@@ -221,6 +227,7 @@ def _extract_claims(payload: AnswerPayload) -> List[Dict[str, str]]:
 
 
 def _split_sentences(text: str) -> List[str]:
+    """Split freeform text into sentences using simple punctuation heuristics."""
     if not text:
         return []
     sentences = re.split(r"(?<=[.!?])\s+", text)
@@ -228,6 +235,7 @@ def _split_sentences(text: str) -> List[str]:
 
 
 def _build_doc_lookup(documents: Sequence[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Create multiple identifier mappings so citations can resolve documents."""
     exact: Dict[str, Dict[str, Any]] = {}
     source_map: Dict[str, Dict[str, Any]] = {}
     alt_keys: List[Tuple[str, Dict[str, Any]]] = []
@@ -258,6 +266,7 @@ def _resolve_doc_for_citation(
     citation: CitationEntry,
     lookup: Dict[str, Any],
 ) -> Optional[Dict[str, Any]]:
+    """Match a citation against any known document identifier variant."""
     doc_id = getattr(citation, "doc_id", "") or ""
     if doc_id in lookup["exact"]:
         return lookup["exact"][doc_id]
@@ -276,6 +285,7 @@ def _resolve_doc_for_citation(
 
 
 def _compare_claim_to_content(claim: str, content: str) -> Tuple[float, str]:
+    """Return similarity score and supporting span between a claim and document."""
     tokens = _tokenize(claim)
     normalized_tokens = set(tokens)
     lowered_content = content.lower()
@@ -312,12 +322,14 @@ def _compare_claim_to_content(claim: str, content: str) -> Tuple[float, str]:
 
 
 def _tokenize(text: str) -> List[str]:
+    """Lowercase and filter a text into informative tokens."""
     words = re.findall(r"\b[\w']+\b", text.lower())
     tokens = [word for word in words if len(word) >= _MIN_TOKEN_LENGTH and word not in _STOP_WORDS]
     return tokens
 
 
 def _build_span(content: str, matches: List[Tuple[int, int]]) -> str:
+    """Expand matching token windows into a human-readable excerpt."""
     if not matches:
         return ""
     start = min(match[0] for match in matches)

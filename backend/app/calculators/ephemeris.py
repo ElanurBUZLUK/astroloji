@@ -1,16 +1,39 @@
-"""
-Swiss Ephemeris wrapper for astrological calculations
-"""
-# For now, use mock data to avoid Swiss Ephemeris integration issues
-SWISSEPH_AVAILABLE = False
-print("Using mock ephemeris data for calculations")
+"""Swiss Ephemeris wrapper for astrological calculations."""
+from __future__ import annotations
 
-from typing import Dict, List, Tuple, Optional
-from datetime import datetime, date
+import math
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
 import pytz
 from dateutil import tz
-import math
+from loguru import logger
+
+try:  # pragma: no cover - import-time capability check
+    import swisseph as swe  # type: ignore
+    SWISSEPH_AVAILABLE = True
+except Exception as exc:  # pragma: no cover - fallback path
+    swe = None  # type: ignore
+    SWISSEPH_AVAILABLE = False
+    logger.warning(
+        "Swiss Ephemeris unavailable; falling back to mock calculations",
+        extra={"error": str(exc)},
+    )
+
+from backend.app.config import settings
+
+if SWISSEPH_AVAILABLE:
+    ephe_path = settings.SWISSEPH_DATA_PATH
+    if ephe_path:
+        try:
+            swe.set_ephe_path(str(Path(ephe_path).expanduser()))
+        except Exception as exc:  # pragma: no cover - environment specific
+            logger.warning(
+                "Failed to set Swiss Ephemeris data path",
+                extra={"path": ephe_path, "error": str(exc)},
+            )
 
 @dataclass
 class PlanetPosition:
@@ -100,14 +123,27 @@ class EphemerisService:
         }
     
     def __init__(self, ephemeris_path: Optional[str] = None):
-        """Initialize ephemeris service"""
+        """Initialize ephemeris service."""
+        self._ephemeris_path = ephemeris_path or settings.SWISSEPH_DATA_PATH
+        self._mock_used = not SWISSEPH_AVAILABLE
         if SWISSEPH_AVAILABLE:
-            # PySwisseph uses built-in ephemeris by default
-            # Set flags for speed calculation
-            self.flags = swe.FLG_SPEED
+            if self._ephemeris_path:
+                try:
+                    swe.set_ephe_path(str(Path(self._ephemeris_path).expanduser()))
+                except Exception as exc:  # pragma: no cover - environment specific
+                    logger.warning(
+                        "Failed to configure Swiss Ephemeris path",
+                        extra={"path": self._ephemeris_path, "error": str(exc)},
+                    )
+            self.flags = getattr(swe, "FLG_SWIEPH", 0) | getattr(swe, "FLG_SPEED", 0)
         else:
-            self.flags = 0  # Mock flags
-    
+            self.flags = 0
+
+    @property
+    def status(self) -> str:
+        """Return execution mode information for observability."""
+        return "mock" if self._mock_used else "swisseph"
+
     def julian_day(self, dt: datetime) -> float:
         """Convert datetime to Julian Day"""
         # Convert to UTC if timezone aware
@@ -134,8 +170,9 @@ class EphemerisService:
         
         if not SWISSEPH_AVAILABLE:
             # Use mock data when Swiss Ephemeris is not available
+            self._mock_used = True
             return self._get_mock_planet_position(planet, jd)
-        
+
         try:
             # Special handling for South Node
             if planet == 'South Node':
@@ -146,11 +183,15 @@ class EphemerisService:
             else:
                 result = swe.calc_ut(jd, planet_id, self.flags)
                 position_data = result[0]
-        except Exception as e:
+        except Exception as exc:
             # If Swiss Ephemeris fails, use mock calculation
-            print(f"Swiss Ephemeris error for {planet}: {e}")
+            logger.warning(
+                "Swiss Ephemeris planet calculation failed",
+                extra={"planet": planet, "error": str(exc)},
+            )
+            self._mock_used = True
             return self._get_mock_planet_position(planet, jd)
-        
+
         return PlanetPosition(
             name=planet,
             longitude=position_data[0],
@@ -175,6 +216,7 @@ class EphemerisService:
             raise ValueError(f"Unknown house system: {house_system}")
         
         if not SWISSEPH_AVAILABLE:
+            self._mock_used = True
             return self._get_mock_houses(jd, lat, lon, house_system)
         
         hsys = self.HOUSE_SYSTEMS[house_system]
@@ -196,8 +238,12 @@ class EphemerisService:
                 co_asc_munkasey=ascmc[6],
                 polar_asc=ascmc[7]
             )
-        except Exception as e:
-            print(f"Swiss Ephemeris houses error: {e}")
+        except Exception as exc:
+            logger.warning(
+                "Swiss Ephemeris house computation failed",
+                extra={"error": str(exc)},
+            )
+            self._mock_used = True
             return self._get_mock_houses(jd, lat, lon, house_system)
     
     def get_whole_sign_houses(self, asc_longitude: float) -> List[float]:

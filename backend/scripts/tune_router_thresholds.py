@@ -17,7 +17,7 @@ if str(ROOT) not in sys.path:
 from types import SimpleNamespace
 
 try:
-    from app.config import settings as _settings
+    from backend.app.config import settings as _settings
 except Exception:  # pragma: no cover - fallback for missing/extra env vars
     _settings = SimpleNamespace(
         LLM_ROUTER_CONF_LOW=0.55,

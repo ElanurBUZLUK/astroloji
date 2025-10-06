@@ -13,6 +13,8 @@ from app.interpreters.core import InterpretationEngine
 from app.interpreters.output_composer import OutputMode, OutputStyle
 from app.rag.core import RAGSystem
 from app.rag.planner import QueryPlanner, PlanStep
+from app.rag.retriever import build_retriever_profile, search_hybrid
+from app.rag.re_ranker import rerank as bge_rerank
 from app.rag import kg_connector, sql_connector
 from app.schemas import (
     AnswerBody,
@@ -28,9 +30,13 @@ from app.schemas import (
 )
 from app.pipelines.cache import RedisSemanticCache, SemanticCache
 from app.pipelines.claim_alignment import score_claim_alignment
-from app.pipelines.sanitization import sanitize_text, sanitize_sequence
+from app.pipelines.sanitization import (
+    sanitize_text,
+    sanitize_sequence,
+    apply_answer_safeguards,
+)
 from app.pipelines.degrade import DegradePolicyManager, DegradeDecision
-from app.config import settings
+from backend.app.config import settings
 from app.pipelines.chart_builder import ChartBootstrapper
 from app.core.llm.providers.openai import OpenAIProvider
 from app.core.llm.provider_pool import LLMProviderPool, ProviderEntry
@@ -65,6 +71,9 @@ class RAGAnswerPipeline:
         self._planner = QueryPlanner()
         self._degrade = DegradePolicyManager()
         self._last_routing_outcome: Optional[RoutingOutcome] = None
+        self._retriever_profile = build_retriever_profile()
+        self._dense_store = self._retriever_profile.get("dense")
+        self._sparse_store = self._retriever_profile.get("sparse")
 
     async def run(self, request: RAGAnswerRequest) -> RAGAnswerResponse:
         """Execute the end-to-end RAG and interpretation workflow for a user query."""
@@ -113,6 +122,15 @@ class RAGAnswerPipeline:
         rag_policy = degrade_state.rag_overrides if degrade_state.active else None
         rag_response = await self._rag.query_for_interpretation(
             main_elements, rag_context, policy=rag_policy
+        )
+
+        base_query = getattr(request, "query", "") or ""
+        hybrid_query = (" ".join(main_elements[:3]) or base_query or "astroloji yorum")
+        top_k_policy = max(1, int(rag_policy.get("top_k", 8)) if rag_policy else 8)
+        await self._hydrate_documents_with_hybrid(
+            hybrid_query,
+            top_k_policy,
+            rag_response,
         )
 
         rag_response.retrieved_content = sanitize_sequence(rag_response.retrieved_content or [])
@@ -382,16 +400,69 @@ class RAGAnswerPipeline:
         if rag_snippets:
             watchouts.append("Kaynaklardan öne çıkan not: " + rag_snippets[0][:120] + "...")
 
-        citations = [
-            CitationEntry(
-                n=index + 1,
-                doc_id=getattr(cite, "id", f"doc-{index+1}"),
-                span=getattr(cite, "span", "(0,0)"),
-                title=getattr(cite, "title", None),
-                source=getattr(cite, "source_type", None),
+        def _safe_int(value: Any, default: int) -> int:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return default
+
+        doc_meta_map: Dict[str, Dict[str, Any]] = {}
+        doc_content_map: Dict[str, str] = {}
+        for doc in rag_response.documents or []:
+            metadata = doc.get("metadata") or {}
+            primary_id = metadata.get("doc_id") or doc.get("source_id")
+            if primary_id:
+                doc_meta_map[primary_id] = metadata
+                doc_content_map[primary_id] = doc.get("content", "")
+            source_id = doc.get("source_id")
+            if source_id and source_id not in doc_meta_map:
+                doc_meta_map[source_id] = metadata
+                doc_content_map[source_id] = doc.get("content", "")
+
+        raw_citations = list(rag_response.citations or [])
+        citations: List[CitationEntry] = []
+
+        if raw_citations:
+            for index, cite in enumerate(raw_citations):
+                source_id = getattr(cite, "source_id", None) or getattr(cite, "id", None)
+                metadata = doc_meta_map.get(source_id, {})
+                snippet = getattr(cite, "content_snippet", None) or doc_content_map.get(source_id, "")[:200]
+                citations.append(
+                    CitationEntry(
+                        doc_id=source_id or f"doc-{index+1}",
+                        section=_safe_int(metadata.get("section"), index),
+                        line_start=_safe_int(metadata.get("line_start"), 0),
+                        line_end=_safe_int(metadata.get("line_end"), 0),
+                        tradition=metadata.get("tradition") or getattr(cite, "source_type", None),
+                        language=metadata.get("language"),
+                        source_url=getattr(cite, "url", None) or metadata.get("source_url"),
+                        snippet=snippet,
+                    )
+                )
+        elif doc_meta_map:
+            # Fallback: synthesize citations from available documents
+            for index, (doc_id, metadata) in enumerate(doc_meta_map.items()):
+                content = doc_content_map.get(doc_id, "")
+                citations.append(
+                    CitationEntry(
+                        doc_id=doc_id or f"doc-{index+1}",
+                        section=_safe_int(metadata.get("section"), index),
+                        line_start=_safe_int(metadata.get("line_start"), 0),
+                        line_end=_safe_int(metadata.get("line_end"), 0),
+                        tradition=metadata.get("tradition"),
+                        language=metadata.get("language"),
+                        source_url=metadata.get("source_url"),
+                        snippet=(content or "")[:200],
+                    )
+                )
+                if len(citations) >= 1:
+                    break
+
+        if not citations:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Citations required",
             )
-            for index, cite in enumerate(rag_response.citations or [])
-        ]
 
         answer_body = AnswerBody(
             general_profile=interpretation.summary,
@@ -401,6 +472,7 @@ class RAGAnswerPipeline:
             collective_note="Bu yorum, genel astrolojik ilkeler temel alınarak oluşturuldu.",
             mythic_refs=["Satürn = Kronos, zamanın efendisi."],
         )
+        answer_body = apply_answer_safeguards(answer_body)
 
         coverage_ok = coverage.get("pass", bool(rag_snippets))
         coverage_score = coverage.get("score")
@@ -413,13 +485,19 @@ class RAGAnswerPipeline:
             coverage_score=coverage_score,
         )
 
-        answer_payload = AnswerPayload(
-            answer=answer_body,
-            citations=citations,
-            confidence=float(getattr(interpretation, "overall_confidence", 0.0)),
-            limits=metadata,
-            evidence_summary=interpretation.evidence_summary,
-        )
+        try:
+            answer_payload = AnswerPayload(
+                answer=answer_body,
+                citations=citations,
+                confidence=float(getattr(interpretation, "overall_confidence", 0.0)),
+                limits=metadata,
+                evidence_summary=interpretation.evidence_summary,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
 
         allow_llm_revision = True
         if degrade_state.active and degrade_state.llm_overrides.get("skip_revision"):
@@ -436,6 +514,7 @@ class RAGAnswerPipeline:
             )
             if llm_revision:
                 answer_payload = llm_revision
+                apply_answer_safeguards(answer_payload.answer)
 
         return answer_payload
 
@@ -713,6 +792,73 @@ class RAGAnswerPipeline:
                     supplemental_docs.extend(sql_connector.summarize_core(chart_data))
         return supplemental_docs
 
+    async def _hydrate_documents_with_hybrid(
+        self,
+        query_text: str,
+        top_k: int,
+        rag_response: Any,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Refresh RAG documents using the configured hybrid retrieval profile."""
+
+        if not (self._dense_store or self._sparse_store):
+            return
+
+        try:
+            results = await search_hybrid(
+                query_text,
+                max(1, top_k),
+                self._dense_store,
+                self._sparse_store,
+                filters=filters,
+            )
+        except Exception as exc:  # pragma: no cover - best-effort fallback
+            self._logger.warning("Hybrid retrieval failed: %s", exc)
+            return
+
+        if not results:
+            return
+
+        try:
+            reranked = bge_rerank(query_text, results) or results
+        except Exception as exc:  # pragma: no cover - reranker optional
+            self._logger.warning("BGE reranker unavailable: %s", exc)
+            reranked = results
+
+        limited = reranked[: max(1, top_k)]
+        documents: List[Dict[str, Any]] = []
+        for res in limited:
+            metadata = dict(res.metadata or {})
+            metadata.setdefault("doc_id", metadata.get("doc_id") or res.source_id)
+            documents.append(
+                {
+                    "content": res.content,
+                    "score": float(res.score),
+                    "source_id": res.source_id,
+                    "doc_id": metadata.get("doc_id"),
+                    "metadata": metadata,
+                    "method": getattr(res.method, "value", "hybrid"),
+                }
+            )
+
+        rag_response.documents = documents
+        rag_response.retrieved_content = [doc["content"] for doc in documents]
+
+        try:
+            rag_response.citations = self._rag.citation_manager.create_citations(limited)
+        except Exception as exc:  # pragma: no cover - citation fallback
+            self._logger.warning("Citation generation failed: %s", exc)
+            rag_response.citations = rag_response.citations or []
+
+        rag_response.retrieval_stats = {
+            "total_retrieved": len(results),
+            "final_count": len(documents),
+            "retrieval_method": "hybrid",
+            "average_score": sum(doc["score"] for doc in documents) / len(documents)
+            if documents
+            else 0.0,
+        }
+
     async def _run_multi_hop(
         self,
         main_elements: List[str],
@@ -893,6 +1039,7 @@ class RAGAnswerPipeline:
                 limits={**payload.limits.model_dump(), **repaired.get("limits", {})},
                 evidence_summary=payload.evidence_summary,
             )
+            apply_answer_safeguards(updated_payload.answer)
             if outcome:
                 provider_tag = outcome.decision.provider or (
                     outcome.decision.model.default_provider or ""
@@ -904,20 +1051,20 @@ class RAGAnswerPipeline:
                     not outcome.validation_error
                     and bool(updated_payload.limits.coverage_ok)
                 )
-                    observability.metrics.record_histogram(
-                        "llm_router_confidence_metric",
-                        outcome.decision.confidence_score,
-                        tags={
-                            "success": "1" if success_flag else "0",
-                            "provider": provider_tag,
-                            "model": outcome.decision.model.key,
-                        },
-                    )
-                    observability.metrics.record_histogram(
-                        "llm_provider_latency",
-                        outcome.latency_ms,
-                        tags={"provider": provider_tag},
-                    )
+                observability.metrics.record_histogram(
+                    "llm_router_confidence_metric",
+                    outcome.decision.confidence_score,
+                    tags={
+                        "success": "1" if success_flag else "0",
+                        "provider": provider_tag,
+                        "model": outcome.decision.model.key,
+                    },
+                )
+                observability.metrics.record_histogram(
+                    "llm_provider_latency",
+                    outcome.latency_ms,
+                    tags={"provider": provider_tag},
+                )
                 for provider_name, health in outcome.decision.health_snapshot.items():
                     observability.metrics.record_histogram(
                         "llm_provider_health_score",

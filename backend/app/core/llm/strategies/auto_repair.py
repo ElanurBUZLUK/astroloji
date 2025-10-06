@@ -11,6 +11,7 @@ class AutoRepair:
     REQUIRED_KEYS = {"answer", "citations", "confidence", "limits"}
 
     def repair(self, raw_content: str) -> Dict[str, Any]:
+        """Parse the raw LLM content and backfill any missing structural fields."""
         try:
             data = json.loads(raw_content)
         except json.JSONDecodeError:

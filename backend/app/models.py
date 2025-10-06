@@ -104,6 +104,7 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 class ZRPeriod(Base):
+    """Serialized slice of zodiacal releasing timing data."""
     __tablename__ = "zr_periods"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -121,6 +122,7 @@ class ZRPeriod(Base):
 
 
 class ProfectionPeriod(Base):
+    """Yearly profection summary tied to a stored chart."""
     __tablename__ = "profection_periods"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -135,6 +137,7 @@ class ProfectionPeriod(Base):
 
 
 class FirdariaPeriod(Base):
+    """Major or minor firdaria interval derived from the chart."""
     __tablename__ = "firdaria_periods"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
